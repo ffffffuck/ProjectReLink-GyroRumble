@@ -938,9 +938,12 @@ def main():
         exe = os.path.join(out, EXE)   # (+ relink-game.map: crash offsets -> f_<guest address>)
         t = time.time()
         # (--export-dynamic-symbol: the window's state, which the Vulkan back end's own Win32 calls read by name)
+        # The instrumented objects already contain the counters, and host/pgo_rt.c supplies the
+        # small runtime that writes them.  Passing -fprofile-instr-generate again at this final
+        # Linux link makes clang look for libclang_rt.profile, which the packaged toolchain need
+        # not contain.
         r = subprocess.run([cc] + target() + ["-fuse-ld=lld", "-o", exe, "-Wl,-Map=" + exe + ".map", "-Wl,--gc-sections",
                                               "-Wl,--export-dynamic-symbol=hos_posix_*", "@" + rsp] + HOT_ORDER() +
-                           (["-fprofile-instr-generate"] if PGO == "gen" else []) +
                            (FFMPEG_LX[1] if FFMPEG_LX else []) + HOST_LIBS,
                            capture_output=True, text=True)
         undefined = sorted({l.strip() for l in (r.stdout + r.stderr).splitlines() if "undefined symbol" in l})
