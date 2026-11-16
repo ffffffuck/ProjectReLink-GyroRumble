@@ -2,7 +2,7 @@ name: Sync ProjectReLink upstream
 
 on:
   schedule:
-    - cron: '17 9 * * *'
+    - cron: '17 */4 * * *'
   workflow_dispatch:
 
 permissions: {}
