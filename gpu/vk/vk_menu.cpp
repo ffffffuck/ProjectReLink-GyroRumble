@@ -13,8 +13,16 @@
 // started with, and the Graphics tab lists them. Closing the menu then asks whether to restart now (menu_restart.h):
 // Later keeps the saved settings for the next start and is not asked again until they change; Restart now saves and
 // closes the window as the player would, and the game starts again (WM_APP + 9: host/hos_relaunch.c).
+// (relink, issue 32) The Gameplay tab's Quit game asks the same way (Back, the default, or Quit); Quit saves the options
+// and the pipeline cache as Restart now does and closes the window as the player would, and the game exits (WM_APP + 10:
+// host/display.c, host/posix/display_sdl.c). The launcher puts the display's refresh rate back when the game's process ends.
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <filesystem>
+#include <map>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -28,6 +36,8 @@
 #include "vk_menu_hit.h"
 #include "vk_draw.h"   // (pipeline_cache_save: Restart now keeps what was built)
 #include "oot_cheat_items.h"
+#include "oot_teleport_capture.h"   // (relink: the Travel page's pictures)
+#include "oot_tp_places.h"   // (relink: the Travel page's places)
 #include "vk_startup_paint.h"
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
 #include "vk_dlss.h"
@@ -312,6 +322,10 @@ const char* tx_text_speed(int v) {
     return t[v];
 }
 const char* tx_ultrawide(int v) { return v ? "Monitor's shape" : "16:9"; }
+const char* tx_cycle_items(int v) {   // (relink) the Cycle items row
+    static const char* t[] = {"Off", "Last used", "Basic", "+Bombs", "+Tools"};
+    return t[(unsigned)v < 5 ? v : 0];
+}
 const char* tx_gpu(int v) {
     static char buf[300];
     const int idx = v - 1;
@@ -460,13 +474,20 @@ const char* hn_sharpness(int v, int variant) {
     return which == 1 ? dlss : which == 2 ? fsr : v == 0 ? "Off: the picture as it is." : nullptr;
 }
 MENU_HINTS(hn_handheld, 0, "Docked: the Output resolution's size.", "Lower resolutions, lighter on the GPU.")
-MENU_HINTS(hn_ultrawide, 0, "The game's own shape.", "The camera widens to fill the screen. The HUD is still stretched.")
+MENU_HINTS(hn_ultrawide, 0, "The game's own shape.",
+    "The camera widens to fill a screen wider than 16:9 (21:9, 32:9), the HUD in the middle. A 16:10 or 4:3 screen keeps 16:9.")
 MENU_HINTS(hn_robust, 0, "On, on every card.", "Can be faster on some NVIDIA cards.", "Always on.")
 MENU_HINTS(hn_fps, 0, nullptr, "With frame generation on, the game's own rate too.")
 MENU_HINTS(hn_speed, 0, "A step each frame: the game slows down whenever it runs below 60 fps.",
            "Normal speed down to 15 fps, by taking longer steps.")
 MENU_HINTS(hn_text_speed, 0, "The game's own pace, with its pauses.", "Twice as fast.", "Four times as fast.",
            "Each page at once, as pressing A does.")
+MENU_HINTS(hn_item_wheel, 0, "R and L scroll the game's own item row.",
+           "Pages of 8 items, the same for the child and the adult. Y moves an item; Left/Right or the mouse wheel turn the page.")
+MENU_HINTS(hn_cycle_items, 0, "R and L open the item row (or the wheel) only.",
+           "A tap of R or L: the item that was on ZR before this one, whatever it is. Two taps: back again.",
+           "A tap of R or L: the next or previous arrow, bottle or spell on ZR.", "Basic, and the bombs and bombchus too.",
+           "+Bombs, and the hookshot, hammer, slingshot and boomerang too.")
 MENU_HINTS(hn_audio_output, 0, "5.1 when the default output device has 5.1 or more speakers, else stereo.",
            "Stereo, whatever the device has.", "5.1, whatever the device has. Mixed down on stereo speakers.")
 MENU_HINTS(hn_background, 0, "Only while the game's window has the focus.",
@@ -519,7 +540,7 @@ Row rows[] = {
      "Bounds-checked buffer reads: a read past a buffer's end is dropped instead of stopping the GPU. Applies after a "
      "restart.", hn_robust, true},
 
-    // Gameplay (5 rows)
+    // Gameplay (7 rows here; Quit game and Cheats at the end of the table)
     {TAB_GAMEPLAY, "FPS counter", &opts.show_fps, 0, 1, 1, tx_onoff, "Frames per second in the top right corner.", hn_fps,
      false, true},
     {TAB_GAMEPLAY, "Game speed", &opts.realtime, 0, 1, 1, tx_speed, "How the game keeps time when it runs below 60 fps.",
@@ -531,6 +552,10 @@ Row rows[] = {
     {TAB_GAMEPLAY, "Microphone", &opts.mic, 0, 2 + kMaxMics, 1, tx_mic,
      "What the ocarina hears when the game's microphone option is on (playing an instrument, or humming).", hn_mic, false,
      true},
+    {TAB_GAMEPLAY, "Item wheel", &opts.item_wheel, 0, 1, 1, tx_onoff,   // (relink: host/oot_wheel.c, vk_wheel.cpp)
+     "Hold R or L for a wheel of your items: point at one with either stick and let go to equip it.", hn_item_wheel},
+    {TAB_GAMEPLAY, "Cycle items", &opts.cycle_items, 0, 4, 1, tx_cycle_items,
+     "Changes the item on ZR with a tap of R or L, within its group. Holding R or L still opens the row.", hn_cycle_items},
 
     // Controls (14 rows)
     {TAB_CONTROLS, "Controller in background", &opts.pad_background, 0, 1, 1, tx_onoff,
@@ -564,10 +589,13 @@ Row rows[] = {
      "Which face button is which. Binding one yourself on the Controls page makes it Custom.", hn_pad_layout},
     {TAB_CONTROLS, "Controls", nullptr, 0, 0, 0, nullptr,   // (relink: opens its page)
      "Which gamepad button and which keys press each of the Switch's buttons."},
+    {TAB_GAMEPLAY, "Quit game", nullptr, 0, 0, 0, nullptr,   // (relink, issue 32: asks first, then closes the game)
+     "Closes the game, as closing its window does. Your settings are kept; progress since your last save is not."},
     {TAB_GAMEPLAY, "Cheats", nullptr, 0, 0, 0, nullptr,
      "Open the private gameplay tools."},
 };
 constexpr int kCheatsRow = sizeof rows / sizeof rows[0] - 1;
+constexpr int kQuitRow = kCheatsRow - 1;
 bool cheats_enabled = false;
 std::atomic<int> protect_hearts{-1};
 // -1 disables the shortcut, 0 enables it on the ground, and 1 means flying.
@@ -650,8 +678,10 @@ constexpr ItemSections make_item_sections() {
 }
 constexpr ItemSections item_sections = make_item_sections();
 std::atomic<int> item_counts[kItems];   // (-1 until the game side reports: OOT_CHEAT_ITEM_BASE + i)
+std::atomic<int> link_age{-1};          // (relink) 0 child, 1 adult, -1 unknown (OOT_CHEAT_AGE_ID: the item wheel's pages)
 int item_choice = 0, item_scroll = 0;
-constexpr int kCheatRows = 11;
+constexpr int kCheatRows = 12;
+constexpr int kTravelCheat = 11;   // (relink) the Cheats page's Travel row: opens the Travel page, page 6
 constexpr int kRows = sizeof rows / sizeof rows[0];
 constexpr int kMenuWidth = menu_hit::kWidth;   // (at a scale of 1: 720 lines)
 
@@ -693,6 +723,7 @@ std::string restart_list(const char* last) {
     return mr::names(restart_names, restart_state.n, restart_pending(), ", ", last);
 }
 int ask_sel = 0;   // (the restart question's choice: 0 Later, 1 Restart now)
+bool ask_quit = false;   // (page 5 asks Quit game's question instead: 0 Back, 1 Quit)
 /// "Restart needed: " and the pending rows, on one line of width: the last ones as "and N more" when they do not fit
 std::string restart_line(HDC dc, int width) {
     const unsigned all = restart_pending();
@@ -1021,7 +1052,8 @@ const std::vector<int>& bindable_keys() {
     }
     return k;
 }
-int page = 0;          // 0 the options, 1 the controls, 2 the cheats, 3 the teleport list, 4 the inventory, 5 the restart question
+int page = 0;          // 0 the options, 1 the controls, 2 the cheats, 3 the teleport list, 4 the inventory, 5 the restart question,
+                       // 6 (relink) the Travel page
 int csel = 0, ccol = 0;   // the controls' row (kControls: reset) and column (0 the gamepad, 1 the keyboard)
 int listening = 0;     // waiting for the new input: 1 a gamepad's, 2 a key
 bool listen_armed = false;   // (once what started it was let go)
@@ -1041,7 +1073,7 @@ struct Bitmap {
     bool keyed = false;                   // (black is see-through: copied as the runs of pixels in between)
     std::vector<VkBufferImageCopy> runs;
 };
-Bitmap menu_bmp, fps_bmp;
+Bitmap menu_bmp, fps_bmp, notice_bmp;   // (relink: notice_bmp, the Travel page's "picture saved" line)
 std::mutex bmp_mu;
 int scale_of(uint32_t h) { return std::max(1u, h / 720); }
 
@@ -1146,6 +1178,363 @@ void fill(HDC dc, int x, int y, int w, int h, COLORREF c) {
     FillRect(dc, &r, b);
     DeleteObject(b);
 }
+
+// ---- (relink) the Travel page: the places of Link's age, grouped by area (gpu/vk/oot_tp_places.h), with a
+// picture of each, taken in play the first time Link stays a few seconds at the place (vk_replay.cpp teleport_capture). One
+// file a place in the game folder's teleport_pictures folder; nothing is shipped. The files are read and written by a worker
+// thread of their own (picture_worker), never by the replay's, the game's or the menu's: a picture is 389 KB, and a present
+// must not wait on a disk ----
+struct TeleportPicture {
+    uint32_t w = 0, h = 0;
+    std::vector<unsigned char> rgba;
+};
+std::map<std::string, TeleportPicture> teleport_captures;   // (by a place's key; std::map: its nodes stay put)
+std::map<std::string, int> teleport_files;   // (by key: 1 its file being read, 2 read: in teleport_captures, or none on disk)
+std::mutex teleport_captures_mu;   // (both maps: the worker's thread and the menu's)
+std::atomic<int> teleport_capture_want{-1};
+// (whether pictures are taken at all: only once the player has opened the Travel page, in this session or an earlier one (its
+// folder is there). A player who never opens it gets no files and no notice over the game)
+std::atomic<bool> travel_pictures_on{false};
+std::atomic<int> teleport_map_now{-1};   // (the place nearest Link, as the game side says)
+std::atomic<int64_t> notice_until{0};    // (a line over the game while the menu is closed: a picture taken, until then)
+std::atomic<bool> notice_new{false};     // (drawn again at the next frame: a new picture)
+char notice_text[128];
+/// A file in the game folder, or "" (logged) when unknown
+std::string game_folder_file(const char* name) {
+    char exe[MAX_PATH];
+    const DWORD n = game_module_path(exe, MAX_PATH);
+    const std::string path(exe, n && n < MAX_PATH ? n : 0);
+    const size_t slash = path.find_last_of("\\/");
+    if (slash == std::string::npos) {
+        logf("menu: no game folder for %s", name);
+        return "";
+    }
+    return path.substr(0, slash + 1) + name;
+}
+/// A picture's file, teleport_pictures/<key>.bin in the game folder, or "" when the folder is unknown
+std::string teleport_picture_path(const std::string& key) {
+    const std::string dir = game_folder_file("teleport_pictures");
+    return dir.empty() ? "" : dir + "/" + key + ".bin";
+}
+// A picture file: 'FTP2', width, height, then its RGB (no alpha: a picture is opaque). 480x270: 389 KB
+constexpr char kPictureMagic[4] = {'F', 'T', 'P', '2'};
+bool read_picture_file(const std::string& path, TeleportPicture& p) {
+    FILE* f = path.empty() ? nullptr : fopen(path.c_str(), "rb");
+    if (!f) return false;
+    char magic[4];
+    uint32_t wh[2];
+    bool ok = fread(magic, 1, 4, f) == 4 && !memcmp(magic, kPictureMagic, 4) && fread(wh, 4, 2, f) == 2 && wh[0] && wh[0] <= 2048 &&
+              wh[1] && wh[1] <= 2048;
+    std::vector<unsigned char> rgb;
+    if (ok) {
+        rgb.resize((size_t)wh[0] * wh[1] * 3);
+        ok = fread(rgb.data(), 1, rgb.size(), f) == rgb.size();
+    }
+    fclose(f);
+    if (!ok) {
+        logf("menu: %s is no Travel picture, left out", path.c_str());
+        return false;
+    }
+    p.w = wh[0], p.h = wh[1];
+    p.rgba.resize((size_t)p.w * p.h * 4);
+    for (size_t i = 0, n = (size_t)p.w * p.h; i < n; ++i)
+        p.rgba[i * 4] = rgb[i * 3], p.rgba[i * 4 + 1] = rgb[i * 3 + 1], p.rgba[i * 4 + 2] = rgb[i * 3 + 2], p.rgba[i * 4 + 3] = 255;
+    return true;
+}
+bool write_picture_file(const std::string& path, const TeleportPicture& p) {
+    if (path.empty()) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    std::vector<unsigned char> rgb((size_t)p.w * p.h * 3);
+    for (size_t i = 0, n = (size_t)p.w * p.h; i < n; ++i)
+        rgb[i * 3] = p.rgba[i * 4], rgb[i * 3 + 1] = p.rgba[i * 4 + 1], rgb[i * 3 + 2] = p.rgba[i * 4 + 2];
+    FILE* f = fopen((path + ".tmp").c_str(), "wb");
+    if (!f) return false;
+    const uint32_t wh[2] = {p.w, p.h};
+    fwrite(kPictureMagic, 1, 4, f), fwrite(wh, 4, 2, f), fwrite(rgb.data(), 1, rgb.size(), f);
+    bool ok = !ferror(f);
+    ok = fclose(f) == 0 && ok;
+    if (ok) std::filesystem::rename(path + ".tmp", path, ec);   // (over the old one, on either platform)
+    return ok && !ec;
+}
+// The worker's jobs: read a picture's file; Link has stayed near a place (its picture wanted when it has none, here or on
+// disk); keep and write a picture taken; forget one (the page's retake: taken again at the next stay there)
+struct PictureJob {
+    enum Kind { Read, Arrived, Store, Forget, Begin } kind = Read;   // (Begin: the page opened the first time, its folder made)
+    int place = -1;     // (Arrived, Store, Forget: a place of oot_tp_places)
+    std::string name;   // (Read: a place's key)
+    TeleportPicture pic;
+};
+std::mutex picture_jobs_mu;
+std::condition_variable picture_jobs_cv;
+std::deque<PictureJob> picture_jobs;
+/// The picture of this key read into teleport_captures when its file is there; whether it has one now. On the worker
+bool picture_read_now(const std::string& name) {
+    {
+        std::lock_guard lk(teleport_captures_mu);
+        if (teleport_captures.count(name)) return true;
+        if (teleport_files[name] == 2) return false;
+    }
+    TeleportPicture p;
+    const bool have = read_picture_file(teleport_picture_path(name), p);
+    std::lock_guard lk(teleport_captures_mu);
+    if (have && !teleport_captures.count(name)) teleport_captures[name] = std::move(p);
+    teleport_files[name] = 2;
+    return teleport_captures.count(name) != 0;
+}
+void picture_worker() {
+    for (;;) {
+        PictureJob j;
+        {
+            std::unique_lock lk(picture_jobs_mu);
+            picture_jobs_cv.wait(lk, [] { return !picture_jobs.empty(); });
+            j = std::move(picture_jobs.front());
+            picture_jobs.pop_front();
+        }
+        if (j.kind == PictureJob::Begin) {
+            std::error_code ec;
+            const std::string dir = game_folder_file("teleport_pictures");
+            if (!dir.empty()) std::filesystem::create_directories(dir, ec);
+            logf("menu: Travel pictures are taken from now on, in %s%s", dir.c_str(), ec ? " (the folder could not be made)" : "");
+        } else if (j.kind == PictureJob::Read) {
+            picture_read_now(j.name);
+            menu_refresh = true;   // (the page shows it now, if it is the chosen place's)
+        } else if (j.kind == PictureJob::Arrived) {
+            if (!picture_read_now(oot_tp_places[j.place].key)) teleport_capture_want.store(j.place, std::memory_order_relaxed);
+        } else if (j.kind == PictureJob::Forget) {
+            const OotTpPlace& place = oot_tp_places[j.place];
+            {
+                std::lock_guard lk(teleport_captures_mu);
+                teleport_captures.erase(place.key);
+                teleport_files[place.key] = 2;
+            }
+            std::error_code ec;
+            std::filesystem::remove(teleport_picture_path(place.key), ec);
+            logf("menu: Travel picture of %s (%s) forgotten: taken again at the next stay there", place.label, place.key);
+            menu_refresh = true;
+        } else {
+            const OotTpPlace& place = oot_tp_places[j.place];
+            for (size_t i = 3; i < j.pic.rgba.size(); i += 4) j.pic.rgba[i] = 255;   // (opaque, whatever the picture's alpha held)
+            const bool saved = write_picture_file(teleport_picture_path(place.key), j.pic);
+            int count;
+            {
+                std::lock_guard lk(teleport_captures_mu);
+                teleport_captures[place.key] = std::move(j.pic);
+                teleport_files[place.key] = 2;
+                count = (int)teleport_captures.size();
+            }
+            logf("menu: Travel picture of %s (%s) taken (%d in memory)%s", place.label, place.key, count, saved ? "" : "; not saved");
+            if (saved) {   // (the line over the game for 2.5 s)
+                snprintf(notice_text, sizeof notice_text, "Travel picture saved: %s", place.label);
+                notice_new.store(true, std::memory_order_release);
+                notice_until.store(prof_now() + 2500000000LL, std::memory_order_relaxed);
+            }
+        }
+    }
+}
+void picture_job(PictureJob&& j) {
+    static std::once_flag started;
+    std::call_once(started, [] { std::thread(picture_worker).detach(); });   // (it lives as long as the game)
+    {
+        std::lock_guard lk(picture_jobs_mu);
+        picture_jobs.push_back(std::move(j));
+    }
+    picture_jobs_cv.notify_one();
+}
+
+// the list: the places of one age by area, as list_item and list_mouse take a list (an area's heading is a line too)
+struct TravelList {
+    int adult = -1;
+    std::vector<int> place;               // (the shown places, in order: indices into oot_tp_places)
+    std::vector<TeleportSection> areas;   // (each area's title and first shown place)
+};
+TravelList travel;
+int travel_choice = 0, travel_scroll = 0;
+int travel_age_l[2], travel_age_r[2];   // (the Child and Adult buttons' left and right edges as last drawn: the mouse's)
+constexpr int kTravelWidth = 860, kTravelPicX = 354, kTravelPicY = 58, kTravelPicW = 480, kTravelPicH = 270;
+constexpr int kTravelListW = 340;   // (the list's lines end here; the picture is right of it)
+int travel_pick = -1;   // (the age whose places the page lists, chosen with Tab or the top face button; -1 Link's own)
+/// The age whose places the page lists: the one chosen, else Link's as the game side says it (1 adult, else 0: unknown is the
+/// child's). Travelling to the other age's place makes Link that age, as the cheats' Switch age does
+int travel_age() { return travel_pick >= 0 ? travel_pick : link_age.load(std::memory_order_relaxed) == 1 ? 1 : 0; }
+/// The list for Link's age now (made again when it changed)
+void travel_list() {
+    const int adult = travel_age();
+    if (travel.adult == adult) return;
+    travel = {};
+    travel.adult = adult;
+    for (const OotTpArea& a : oot_tp_areas) {
+        if (a.adult != adult) continue;
+        travel.areas.push_back({a.title, (int)travel.place.size()});
+        for (int i = a.first; i < a.first + a.count; i++) travel.place.push_back(i);
+    }
+    travel_choice = std::clamp(travel_choice, 0, std::max(0, (int)travel.place.size() - 1));
+}
+/// Scrolls the list so the chosen place (and its area's heading, at the top) is in view
+void travel_reveal() {
+    const int sections = (int)travel.areas.size(), n = (int)travel.place.size();
+    if (!sections) return;
+    int section = 0;
+    while (section + 1 < sections && travel_choice >= travel.areas[section + 1].first) section++;
+    const int line = travel_choice + section + 1;
+    if (travel_choice == travel.areas[section].first) travel_scroll = std::min(travel_scroll, line - 1);
+    if (line < travel_scroll) travel_scroll = line;
+    if (line >= travel_scroll + kTeleportLines) travel_scroll = line - kTeleportLines + 1;
+    travel_scroll = std::max(0, std::min(travel_scroll, n + sections - kTeleportLines));
+}
+/// The chosen place's picture copied out (under the lock), and whether it has one; its file asked for once when not read yet
+bool travel_picture(int place, TeleportPicture* out, bool* reading) {
+    *reading = false;
+    if (place < 0 || place >= OOT_TP_PLACES) return false;
+    const std::string key = oot_tp_places[place].key;
+    std::lock_guard lk(teleport_captures_mu);
+    const auto it = teleport_captures.find(key);
+    if (it != teleport_captures.end()) {
+        *out = it->second;
+        return true;
+    }
+    int& state = teleport_files[key];
+    if (state == 2) return false;
+    *reading = true;
+    if (state == 0) {
+        state = 1;
+        PictureJob j;
+        j.kind = PictureJob::Read, j.name = key;
+        picture_job(std::move(j));
+    }
+    return false;
+}
+/// Whether a place has a picture, as far as the files read so far say (the list's mark)
+bool travel_has_picture(int place) {
+    std::lock_guard lk(teleport_captures_mu);
+    const std::string key = oot_tp_places[place].key;
+    if (teleport_captures.count(key)) return true;
+    int& state = teleport_files[key];
+    if (state == 0) {   // (asked for: the list marks it once it is read)
+        state = 1;
+        PictureJob j;
+        j.kind = PictureJob::Read, j.name = key;
+        picture_job(std::move(j));
+    }
+    return false;
+}
+/// The Travel page (paint_menu, page 6): the list on the left, the chosen place's picture, name and area on the right
+void paint_travel(HDC dc, uint32_t w, uint32_t h, int s) {
+    travel_list();
+    const int n = (int)travel.place.size(), sections = (int)travel.areas.size();
+    const int rh = menu_hit::kListRowH * s, top = menu_hit::kListTop * s, list_r = kTravelListW * s;
+    {   // (how many places have pictures: in the heading's line)
+        int with = 0;
+        for (int i = 0; i < n; i++) with += travel_has_picture(travel.place[i]);
+        char line[64];
+        snprintf(line, sizeof line, "%d of %d   %d with pictures", travel_choice + 1, n, with);
+        SetTextColor(dc, RGB(140, 150, 144));
+        SIZE size{};
+        GetTextExtentPoint32A(dc, line, (int)strlen(line), &size);
+        TextOutA(dc, (int)w - 16 * s - size.cx, 22 * s, line, (int)strlen(line));
+    }
+    {   // (the ages, beside the title: the one listed lit; Tab or the top face button changes it)
+        HFONT f = font(14 * s, FW_SEMIBOLD);
+        HGDIOBJ was = SelectObject(dc, f);
+        const char* const ages[2] = {"Child", "Adult"};
+        int x = 110 * s;
+        for (int a = 0; a < 2; a++) {
+            SIZE sz{};
+            GetTextExtentPoint32A(dc, ages[a], (int)strlen(ages[a]), &sz);
+            const int bw = (int)sz.cx + 20 * s, bh = 22 * s, by = 14 * s;
+            travel_age_l[a] = x, travel_age_r[a] = x + bw;
+            startup_gdi::round_rect(dc, x, by, bw, bh, 11 * s, a == travel.adult ? RGB(44, 72, 54) : RGB(26, 32, 29));
+            SetTextColor(dc, a == travel.adult ? RGB(255, 255, 255) : RGB(140, 150, 144));
+            TextOutA(dc, x + 10 * s, by + (bh - (int)sz.cy) / 2, ages[a], (int)strlen(ages[a]));
+            x += bw + 6 * s;
+        }
+        SetTextColor(dc, RGB(110, 125, 116));
+        const char* key = "Tab / X";
+        TextOutA(dc, x + 6 * s, 16 * s, key, (int)strlen(key));
+        SelectObject(dc, was);
+        DeleteObject(f);
+    }
+    for (int line = travel_scroll; line < std::min(n + sections, travel_scroll + kTeleportLines); line++) {
+        const int y = top + (line - travel_scroll) * rh;
+        list_value_l[line - travel_scroll] = list_r;
+        int section = 0;
+        while (section + 1 < sections && line >= travel.areas[section + 1].first + section + 1) section++;
+        if (line == travel.areas[section].first + section) {
+            SetTextColor(dc, RGB(96, 176, 112));
+            TextOutA(dc, 16 * s, y + 4 * s, travel.areas[section].name, (int)strlen(travel.areas[section].name));
+            continue;
+        }
+        const int i = line - section - 1;
+        if (i == travel_choice) startup_gdi::round_rect(dc, 8 * s, y, list_r - 8 * s, rh, 6 * s, RGB(44, 72, 54));
+        SetTextColor(dc, i == travel_choice ? RGB(255, 255, 255) : RGB(196, 204, 198));
+        const char* label = oot_tp_places[travel.place[i]].label;
+        TextOutA(dc, 32 * s, y + 3 * s, label, (int)strlen(label));
+        if (travel_has_picture(travel.place[i])) {   // (a small square: this place has its picture)
+            const int b = 8 * s, x = list_r - 14 * s - b, yy = y + (rh - b) / 2;
+            startup_gdi::round_rect(dc, x, yy, b, b, 2 * s, i == travel_choice ? RGB(200, 220, 205) : RGB(110, 135, 120));
+        }
+    }
+    fill(dc, list_r + 6 * s, top, 2 * s, kTeleportLines * rh, RGB(30, 38, 33));   // (the line between the list and the picture)
+    const int place = n ? travel.place[travel_choice] : -1;
+    const int px = kTravelPicX * s, py = kTravelPicY * s, pw = kTravelPicW * s, ph = kTravelPicH * s;
+    TeleportPicture pic;
+    bool reading = false;
+    const bool have = travel_picture(place, &pic, &reading);
+    GdiFlush();
+    if (have && paint_bits && pic.w && pic.h) {   // (the picture, scaled to its box: written into the bitmap's pixels)
+        for (int y = 0; y < ph && py + y < (int)h; y++) {
+            const uint32_t sy = (uint32_t)((uint64_t)y * pic.h / ph);
+            uint32_t* row = paint_bits + (size_t)(py + y) * w;
+            for (int x = 0; x < pw && px + x < (int)w; x++) {
+                const unsigned char* q = &pic.rgba[((size_t)sy * pic.w + (uint32_t)((uint64_t)x * pic.w / pw)) * 4];
+                row[px + x] = (uint32_t)q[0] << 16 | (uint32_t)q[1] << 8 | q[2];
+            }
+        }
+    } else {   // (none yet: a striped box saying how one comes)
+        for (int y = 0; y < ph && paint_bits && py + y < (int)h; y++) {
+            uint32_t* row = paint_bits + (size_t)(py + y) * w;
+            for (int x = 0; x < pw && px + x < (int)w; x++) row[px + x] = ((x + y) / (12 * s)) % 2 ? 0x171d1a : 0x141917;
+        }
+        SetTextColor(dc, RGB(130, 140, 134));
+        const char* l1 = reading ? "Reading the picture..." : "No picture yet:";
+        const char* l2 = reading ? "" : "stay here a few seconds with the menu closed.";
+        SIZE a{}, b{};
+        GetTextExtentPoint32A(dc, l1, (int)strlen(l1), &a);
+        GetTextExtentPoint32A(dc, l2, (int)strlen(l2), &b);
+        TextOutA(dc, px + (pw - (int)a.cx) / 2, py + ph / 2 - (int)a.cy, l1, (int)strlen(l1));
+        TextOutA(dc, px + (pw - (int)b.cx) / 2, py + ph / 2, l2, (int)strlen(l2));
+    }
+    if (place >= 0) {
+        const OotTpPlace& p = oot_tp_places[place];
+        HFONT big = font(20 * s, FW_SEMIBOLD), small = font(14 * s, FW_NORMAL);
+        HGDIOBJ was = SelectObject(dc, big);
+        SetTextColor(dc, RGB(255, 255, 255));
+        TextOutA(dc, px, py + ph + 12 * s, p.label, (int)strlen(p.label));
+        SelectObject(dc, small);
+        SetTextColor(dc, RGB(150, 165, 155));
+        const char* area = "";
+        for (const TeleportSection& a : travel.areas)
+            if (a.first <= travel_choice) area = a.name;
+        char where[96];
+        const bool other = link_age.load(std::memory_order_relaxed) >= 0 && link_age.load(std::memory_order_relaxed) != travel.adult;
+        snprintf(where, sizeof where, "%s   (%s%s)", area, travel.adult ? "adult" : "child",
+                 other ? ": Link becomes that age" : "");
+        TextOutA(dc, px, py + ph + 40 * s, where, (int)strlen(where));
+        SetTextColor(dc, RGB(176, 186, 180));
+        wrap_help(dc, "Link arrives here through the game's own map change, as when he walks in. A small square in the list: a "
+                      "place with a picture.", pw, px, py + ph + 70 * s, true);
+        SelectObject(dc, was);
+        DeleteObject(big);
+        DeleteObject(small);
+    }
+    SetTextColor(dc, RGB(130, 140, 134));
+    const int bottom = top + kTeleportLines * rh + 8 * s;
+    const char* hint = "Up/Down choose   Left/Right or Q/E: next area   Tab or X: child / adult   Enter travels   Esc back";
+    TextOutA(dc, 16 * s, bottom, hint, (int)strlen(hint));
+    const char* hint2 = "PgUp/PgDn/Home/End jump   Y or Backspace: take this picture again at the next stay there";
+    TextOutA(dc, 16 * s, bottom + 20 * s, hint2, (int)strlen(hint2));
+}
+
 void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
     fill(dc, 0, 0, (int)w, (int)h, RGB(16, 20, 18));
     fill(dc, 0, 0, (int)w, 2 * s, RGB(96, 176, 112));
@@ -1153,7 +1542,7 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
     HFONT title = font(20 * s, FW_SEMIBOLD), body = font(16 * s, FW_NORMAL);
     HGDIOBJ old = SelectObject(dc, title);
     SetTextColor(dc, RGB(236, 240, 236));
-    const char* heading = page == 5 ? "Restart needed" : page == 4 ? "Inventory" : page == 3 ? "Teleport"
+    const char* heading = page == 6 ? "Travel" : page == 5 ? (ask_quit ? "Quit game" : "Restart needed") : page == 4 ? "Inventory" : page == 3 ? "Teleport"
                         : page == 2 ? "Cheats" : "Project ReLink";
     TextOutA(dc, 16 * s, 12 * s, heading, (int)strlen(heading));
     {   // (which build, beside the title, so a report can say it without opening the log; the release alone when the whole
@@ -1171,14 +1560,21 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
             ver.resize(ver.find(" ("));
             GetTextExtentPoint32A(dc, ver.c_str(), (int)ver.size(), &sz);
         }
-        if (sz.cx <= room) TextOutA(dc, (int)w - 16 * s - sz.cx, 18 * s, ver.c_str(), (int)ver.size());
+        if (sz.cx <= room && page != 6) TextOutA(dc, (int)w - 16 * s - sz.cx, 18 * s, ver.c_str(), (int)ver.size());
         SelectObject(dc, title);
         DeleteObject(small);
     }
     SelectObject(dc, body);
-    if (page == 5) {   // (relink) the restart question, as the menu closes with a setting that takes a restart
+    if (page == 6) {   // (relink) the Travel page
+        paint_travel(dc, w, h, s);
+        SelectObject(dc, old);
+        DeleteObject(title);
+        DeleteObject(body);
+        return;
+    }
+    if (page == 5) {   // (relink) the restart question, as the menu closes with a setting that takes a restart, or Quit game's
         SetTextColor(dc, RGB(236, 240, 236));
-        const std::string ask = "Restart to apply " + restart_list(" and ") + "?";
+        const std::string ask = ask_quit ? std::string("Quit the game?") : "Restart to apply " + restart_list(" and ") + "?";
         const int asked = wrap_help(dc, ask.c_str(), (int)w - 32 * s, 16 * s, 46 * s, true);   // (one line or two)
         HFONT small = font(14 * s, FW_NORMAL);
         SelectObject(dc, small);
@@ -1186,7 +1582,7 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
         const char* lost = "Progress since your last save is lost.";
         TextOutA(dc, 16 * s, std::min(46 * s + asked + 4 * s, 94 * s), lost, (int)strlen(lost));
         SelectObject(dc, body);
-        const char* const labels[2] = {"Later", "Restart now"};
+        const char* const labels[2] = {ask_quit ? "Back" : "Later", ask_quit ? "Quit" : "Restart now"};
         for (int i = 0; i < 2; i++) {
             const int x = menu_hit::ask_button_x(i, s), y = menu_hit::kAskButtonY * s;
             const int bw = menu_hit::kAskButtonW * s, bh = menu_hit::kAskButtonH * s;
@@ -1200,7 +1596,7 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
         }
         SelectObject(dc, small);
         SetTextColor(dc, RGB(140, 150, 144));
-        const char* hint = "Left/Right choose   Enter confirms   Esc: Later";
+        const char* hint = ask_quit ? "Left/Right choose   Enter confirms   Esc: Back" : "Left/Right choose   Enter confirms   Esc: Later";
         TextOutA(dc, 16 * s, 168 * s, hint, (int)strlen(hint));
         SelectObject(dc, old);
         DeleteObject(small);
@@ -1310,13 +1706,13 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
     if (page == 2) {
         const char* labels[] = {"Heart protection", "No-clip flight", "Mark position",
                                 "Return to mark", "Set time", "Inventory item", "Change quantity", "Free camera",
-                                "Teleport", "Switch age", "Inventory"};
+                                "Teleport", "Switch age", "Inventory", "Travel"};
         char clock_text[12], quantity[12];
         snprintf(clock_text, sizeof clock_text, "%02d:00", clock_hour);
         snprintf(quantity, sizeof quantity, "%+d", pouch_delta);
         const char* values[] = {tx_onoff(protect_hearts.load() == 1), tx_onoff(player_flight.load() >= 0),
                                 "", "", clock_text, pouch_items[pouch_item], quantity, tx_onoff(free_camera.load()),
-                                teleport_names[teleport_choice], "", ""};
+                                teleport_names[teleport_choice], "", "", ""};
         const char* help[] = {"Protects Link's hearts. Hits can still knock him back.",
             "Enable double-tap Jump for takeoff and landing. Hold Jump to climb or L to descend.",
             "Remember Link's position for this loaded scene.",
@@ -1327,7 +1723,8 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
             "Move and look with your usual controls. Page Up / Page Down or R / L changes height.",
             "Enter opens the map list (Left or Right also changes the map here). Link travels through the game's own map change, in his current age.",
             "Swaps Link between child and adult and reloads this map in the other age (the Market when this map has no match).",
-            "Enter opens the inventory editor: unlock or relock equipment, items, upgrades and quest items, and change amounts."};
+            "Enter opens the inventory editor: unlock or relock equipment, items, upgrades and quest items, and change amounts.",
+            "Go to a place you know: villages, dungeons' entrances, shops, warps. Each with a picture from your own game."};
         for (int i = 0; i < kCheatRows; i++) {
             const int y = (menu_hit::kCheatTop + i * menu_hit::kCheatRowH) * s;
             if (i == cheat_selected) startup_gdi::round_rect(dc, 8 * s, y, (int)w - 16 * s, menu_hit::kCheatRowH * s, 6 * s, RGB(44, 72, 54));
@@ -1500,6 +1897,20 @@ HFONT hard_font(int px, int weight) {
     return CreateFontA(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY,
                        DEFAULT_PITCH, "Segoe UI");
 }
+/// (relink) The Travel page's notice over the game: a picture was saved
+void paint_notice(HDC dc, uint32_t w, uint32_t h, int s) {
+    fill(dc, 0, 0, (int)w, (int)h, RGB(16, 20, 18));
+    fill(dc, 0, 0, (int)w, 2 * s, RGB(96, 176, 112));
+    SetBkMode(dc, TRANSPARENT);
+    HFONT f = font(16 * s, FW_SEMIBOLD);
+    HGDIOBJ old = SelectObject(dc, f);
+    SetTextColor(dc, RGB(236, 240, 236));
+    SIZE sz{};
+    GetTextExtentPoint32A(dc, notice_text, (int)strlen(notice_text), &sz);
+    TextOutA(dc, ((int)w - (int)sz.cx) / 2, ((int)h - (int)sz.cy) / 2 + s, notice_text, (int)strlen(notice_text));
+    SelectObject(dc, old);
+    DeleteObject(f);
+}
 void paint_fps(HDC dc, uint32_t w, uint32_t h, int s) {
     fill(dc, 0, 0, (int)w, (int)h, RGB(0, 0, 0));
     SetBkMode(dc, TRANSPARENT);
@@ -1552,6 +1963,10 @@ int measure_pending(int s) {
     return (int)sz.cy;
 }
 void redraw_menu(int s) {
+    if (page == 6) {   // (relink) the Travel page: the list and the picture
+        gdi_draw(menu_bmp, kTravelWidth * s, (100u + kTeleportLines * (unsigned)menu_hit::kListRowH) * s, paint_menu, s);
+        return;
+    }
     if (page == 5) {
         gdi_draw(menu_bmp, kMenuWidth * s, (unsigned)menu_hit::kAskHeight * s, paint_menu, s);
         return;
@@ -1584,7 +1999,7 @@ struct Upload {
     void* map = nullptr;
     uint64_t size = 0, version = 0;
 };
-Upload ups[3][3];   // (the menu's, the counter's, the start-up screen's; a frame in flight's each)
+Upload ups[4][3];   // (the menu's, the counter's, the start-up screen's, (relink) the Travel notice's; a frame in flight's each)
 
 void copy_over(VkCommandBuffer cmd, VkImage dst, Bitmap& b, Upload& u, int x, int y, uint32_t w, uint32_t h) {
     std::lock_guard lk(bmp_mu);
@@ -1666,6 +2081,12 @@ void menu_init() {
     bool has_options = false;
     const char* cheats = getenv("HOS_OOT_CHEATS");
     cheats_enabled = cheats && !strcmp(cheats, "1");
+    if (cheats_enabled) {   // (relink) the Travel page's pictures: taken when the page was opened before (its folder is there),
+        // and only while the page can be opened: it is on the Cheats page
+        std::error_code ec;
+        const std::string dir = game_folder_file("teleport_pictures");
+        travel_pictures_on.store(!dir.empty() && std::filesystem::is_directory(dir, ec), std::memory_order_relaxed);
+    }
     if (cheats_enabled) {
         const char* hearts = getenv("HOS_OOT_PROTECT_HEARTS");
         protect_hearts.store(hearts && !strcmp(hearts, "1"));
@@ -1748,6 +2169,21 @@ void menu_set_gpu_count(int count) {
 }
 
 bool menu_is_open() { return open_now.load(std::memory_order_relaxed); }
+int menu_take_capture_request() {   // (relink: not while the menu covers the picture)
+    const int want = teleport_capture_want.exchange(-1, std::memory_order_relaxed);
+    return open_now.load(std::memory_order_relaxed) ? -1 : want;
+}
+/// (relink) The replay's thread, at a present: the picture's pixels copied and handed to the picture worker, which keeps and
+/// writes them. No file is touched here
+void menu_store_capture(int place, const uint8_t* rgba, uint32_t w, uint32_t h) {
+    if (place < 0 || place >= OOT_TP_PLACES) return;
+    PictureJob j;
+    j.kind = PictureJob::Store, j.place = place;
+    j.pic.w = w, j.pic.h = h;
+    j.pic.rgba.assign(rgba, rgba + (size_t)w * h * 4);
+    picture_job(std::move(j));
+}
+bool menu_teleport_captures_on() { return travel_pictures_on.load(std::memory_order_relaxed); }   // (relink)
 int menu_heart_protection() { return protect_hearts.load(std::memory_order_relaxed); }
 int menu_player_flight() { return cheats_enabled ? player_flight.load(std::memory_order_relaxed) : -1; }
 int menu_free_camera() { return free_camera.load(std::memory_order_relaxed); }
@@ -1801,7 +2237,22 @@ bool fps_take(int64_t now, int64_t shown, int64_t game, int64_t* next, int64_t* 
     return have;
 }
 
+int menu_item_count(int i) { return i >= 0 && i < kItems ? item_counts[i].load(std::memory_order_relaxed) : -1; }
+int menu_link_age() { return link_age.load(std::memory_order_relaxed); }
 void menu_option_set(int id, int value) {
+    if (id == OOT_CHEAT_AGE_ID) {   // (relink: the Travel page's list is of Link's age)
+        if (link_age.exchange(value, std::memory_order_relaxed) != value && page == 6) menu_refresh = true;
+        return;
+    }
+    if (id == OOT_TP_MAP_ID) return teleport_map_now.store(value, std::memory_order_relaxed);   // (relink: the place nearest Link)
+    if (id == OOT_TP_CAPTURE_ID) {   // (relink: Link stayed near a place: its picture wanted when it has none)
+        if (value >= 0 && value < OOT_TP_PLACES) {
+            PictureJob j;
+            j.kind = PictureJob::Arrived, j.place = value;
+            picture_job(std::move(j));
+        }
+        return;
+    }
     if (id >= OOT_CHEAT_ITEM_BASE && id < OOT_CHEAT_ITEM_BASE + kItems) {   // (the game side's inventory counts)
         if (item_counts[id - OOT_CHEAT_ITEM_BASE].exchange(value, std::memory_order_relaxed) != value && page == 4)
             menu_refresh = true;
@@ -1954,10 +2405,12 @@ void menu_tick() {
         restart_state.choose_later(now);
         open_now = false, page = 0, changed = true;
     };
-    if ((press[0] || press[6]) && open_now.load() && page == 5) {
+    if ((press[0] || press[6]) && open_now.load() && page == 5 && ask_quit) {
+        ask_quit = false, open_now = false, page = 0, changed = true;   // (Quit game's question: the menu closes, nothing else)
+    } else if ((press[0] || press[6]) && open_now.load() && page == 5) {
         later();
     } else if ((press[0] || press[6]) && open_now.load() && restart_ask()) {
-        page = 5, ask_sel = 0, listening = 0, changed = true;
+        page = 5, ask_sel = 0, ask_quit = false, listening = 0, changed = true;
     } else if (press[0] || press[6]) {
         open_now = !open_now.load(), changed = true;
         page = 0, listening = 0;
@@ -1976,7 +2429,15 @@ void menu_tick() {
             if (ptr.wheel) ask_sel ^= 1, changed = true;
         }
         if (press[1] || press[2] || press[3] || press[4] || tab_left || tab_right) ask_sel ^= 1, changed = true;
-        if (press[5] || (press[7] && ask_sel == 0)) {
+        if (ask_quit && (press[5] || (press[7] && ask_sel == 0))) {   // (Back: the menu's list again)
+            ask_quit = false, page = 0, changed = true;
+        } else if (ask_quit && press[7]) {   // (Quit: everything saved, then the window closes as the player would close it)
+            logf("menu: quit game");
+            save();
+            pipeline_cache_save(true);
+            ask_quit = false, open_now = false, page = 0, changed = true;
+            PostMessageA(app_window(), WM_APP + 10, 0, 0);
+        } else if (press[5] || (press[7] && ask_sel == 0)) {
             later();
         } else if (press[7]) {   // (Restart now: everything saved, then the window closes as the player would close it)
             logf("menu: restart now, to apply %s", restart_list(", ").c_str());
@@ -2114,6 +2575,14 @@ void menu_tick() {
             }
             if (press[7] && cheat_selected == 8) page = 3, teleport_reveal(), changed = true;
             if (press[7] && cheat_selected == 10) page = 4, item_reveal(), changed = true;
+            if (press[7] && cheat_selected == kTravelCheat) {   // (relink: the Travel page, Link's own age first)
+                page = 6, travel_pick = -1, travel_list(), travel_reveal(), changed = true;
+                if (!travel_pictures_on.exchange(true, std::memory_order_relaxed)) {   // (pictures are taken from now on)
+                    PictureJob j;
+                    j.kind = PictureJob::Begin;
+                    picture_job(std::move(j));
+                }
+            }
             if (press[7] && cheat_selected == 9) {
                 cheat_action.store(999);   // (host/hos_main.c OOT_AGE_ACTION)
                 open_now = false;
@@ -2180,6 +2649,51 @@ void menu_tick() {
             if (changed) teleport_reveal();
         }
         if (changed) redraw_menu(scale);
+    } else if (open_now.load() && page == 6) {   // (relink) the Travel page
+        travel_list();
+        const int n = (int)travel.place.size(), sections = (int)travel.areas.size();
+        press[9] |= pad(HOS_PAD_WEST);   // (Y on a pad, as Backspace: the picture taken again)
+        bool switch_age = press[12] || pad(HOS_PAD_NORTH);   // (Tab, or X on a pad: the other age's places)
+        if (mouse && (ptr.pressed & HOS_MOUSE_LEFT) && my >= 14 * scale && my < 36 * scale)
+            for (int a = 0; a < 2; a++)
+                if (mx >= travel_age_l[a] && mx < travel_age_r[a] && a != travel.adult) switch_age = true;
+        if (switch_age) {
+            travel_pick = !travel.adult, travel_choice = 0, travel_scroll = 0;
+            travel_list(), travel_reveal(), changed = true;
+            ptr.pressed = 0;
+            if (press[12]) tab_left = tab_right = false;   // (Tab is the tabs' key elsewhere: here the age's alone)
+        }
+        if (mouse && mx < kTravelListW * scale && n)
+            list_mouse(ptr, mx, my, mw, mh, scale, moved, false, n, sections, travel.areas.data(), travel_scroll, travel_choice, press,
+                       changed);
+        else if (mouse && (ptr.pressed & HOS_MOUSE_RIGHT))
+            press[5] = true;
+        if (press[5]) page = 2, changed = true;   // (back to the Cheats page, as the teleport list)
+        else if (press[7] && n) {
+            cheat_action.store(OOT_PLACE_ACTION + travel.place[travel_choice] * 2 + travel.adult);
+            open_now = false, page = 0;   // (back to the game: the map change starts with an event)
+            changed = true;
+        } else if (press[9] && n) {
+            PictureJob j;
+            j.kind = PictureJob::Forget, j.place = travel.place[travel_choice];
+            picture_job(std::move(j));
+        } else if (n) {
+            if (press[1] || press[2]) travel_choice = (travel_choice + n + (press[2] ? 1 : -1)) % n, changed = true;
+            if (press[13] || press[14] || press[15] || press[16]) {   // (Page Up / Page Down, Home / End)
+                travel_choice = press[15] ? 0 : press[16] ? n - 1 : std::clamp(travel_choice + (press[14] ? 1 : -1) * (kTeleportLines - 2), 0, n - 1);
+                changed = true;
+            }
+            if (press[3] || press[4] || tab_left || tab_right) {   // (to the first place of the previous or next area)
+                int section = 0;
+                while (section + 1 < sections && travel_choice >= travel.areas[section + 1].first) section++;
+                const bool back = press[3] || tab_left;
+                if (!back || travel_choice == travel.areas[section].first) section = (section + sections + (back ? -1 : 1)) % sections;
+                travel_choice = travel.areas[section].first;
+                changed = true;
+            }
+            if (changed) travel_reveal();
+        }
+        if (changed) redraw_menu(scale);
     } else if (open_now.load()) {
         if (mouse) {   // (the mouse: see the top of this file)
             const int count = tab_row_count(cur_tab);
@@ -2239,7 +2753,7 @@ void menu_tick() {
                 }
             }
         }
-        if (press[5] && restart_ask()) page = 5, ask_sel = 0, changed = true;   // (the restart question first)
+        if (press[5] && restart_ask()) page = 5, ask_sel = 0, ask_quit = false, changed = true;   // (the restart question first)
         else if (press[5]) open_now = false;
         // (the tabs: LB and RB, Q and E, or Tab)
         if (tab_left) cur_tab = (cur_tab + TAB_COUNT - 1) % TAB_COUNT, changed = true;
@@ -2250,7 +2764,9 @@ void menu_tick() {
         if (press[2]) selected = (selected + 1) % tab_count, changed = true;
         Row& r = rows[tab_row_to_global(cur_tab, selected)];
         if (press[7] && &r == &rows[kCheatsRow]) page = 2, changed = true;
-        else if (press[7] && !r.value && can_bind()) page = 1, csel = 0, ccol = 0, changed = true;
+        else if (press[7] && &r == &rows[kQuitRow]) {   // (Quit game: asked first, Back the default)
+            if (app_window()) page = 5, ask_sel = 0, ask_quit = true, changed = true;
+        } else if (press[7] && !r.value && can_bind()) page = 1, csel = 0, ccol = 0, changed = true;
         if ((press[3] || press[4] || press[7]) && r.value) {   // (Enter, or the bottom face button, as Right)
             if (press[7]) press[4] = true;
             set_row(r, *r.value + (press[4] ? r.step : -r.step), press[4] ? 1 : -1);
@@ -2291,6 +2807,17 @@ void menu_tick() {
             gdi_draw(fps_bmp, 120u * scale, 54u * scale, paint_fps, scale);
         }
     }
+    if (notice_new.exchange(false, std::memory_order_acq_rel)) {   // (relink: the Travel page's "picture saved" line)
+        HDC dc = CreateCompatibleDC(nullptr);
+        HFONT f = font(16 * scale, FW_SEMIBOLD);
+        HGDIOBJ old = SelectObject(dc, f);
+        SIZE sz{};
+        GetTextExtentPoint32A(dc, notice_text, (int)strlen(notice_text), &sz);
+        SelectObject(dc, old);
+        DeleteObject(f);
+        DeleteDC(dc);
+        gdi_draw(notice_bmp, (uint32_t)sz.cx + 40u * scale, 40u * scale, paint_notice, scale);
+    }
 }
 
 void menu_record(VkCommandBuffer cmd, VkImage dst, int slot, uint32_t w, uint32_t h) {
@@ -2328,6 +2855,18 @@ void menu_record(VkCommandBuffer cmd, VkImage dst, int slot, uint32_t w, uint32_
         const uint32_t fw = fps_bmp.w;
         lk.unlock();
         if (fw) copy_over(cmd, dst, fps_bmp, ups[1][slot], (int)w - (int)fw - (int)(12 * cur_scale), (int)(10 * cur_scale), w, h);
+    }
+    if (!open_now.load(std::memory_order_relaxed) && prof_now() < notice_until.load(std::memory_order_relaxed)) {   // (relink)
+        VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        mb.srcStageMask = mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+        mb.srcAccessMask = mb.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.memoryBarrierCount = 1, di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cmd, &di);
+        std::unique_lock lk(bmp_mu);
+        const uint32_t nw = notice_bmp.w, nh = notice_bmp.h;
+        lk.unlock();   // (low in the middle, above the item row's place: the HUD keeps its corners)
+        if (nw && nh + 60 * cur_scale < h) copy_over(cmd, dst, notice_bmp, ups[3][slot], (int)(w - nw) / 2, (int)(h - nh - 60 * cur_scale), w, h);
     }
     if (open_now.load(std::memory_order_relaxed)) {
         std::unique_lock lk(bmp_mu);
