@@ -40,6 +40,9 @@ jobs:
           persist-credentials: false
       - name: Apply gyro and rumble changes
         run: git apply --ignore-space-change --ignore-whitespace ProjectReLink-GyroRumble.patch
+      # The package step copies git-tracked source files; mark the patch-created header as tracked so it ships under tools/host.
+      - name: Include the new HD rumble header in the package
+        run: git add -N host/hd_rumble.h
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
