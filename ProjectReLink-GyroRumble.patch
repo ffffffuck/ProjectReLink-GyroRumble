@@ -1,0 +1,1053 @@
+diff --git a/README.md b/README.md
+index c2629c1..62e9652 100644
+--- a/README.md
++++ b/README.md
+@@ -8,13 +8,18 @@ remake) into a native Windows game: the game's code is translated to PC code and
+ [Français plus bas](#français)
+ 
+ **Discord:** [join the Project ReLink server](https://discord.gg/RFNUtCQk8j) to ask questions, get help and follow new
+-versions. Bugs are still best reported as [issues](https://github.com/pixl27/ProjectReLink/issues) with `relink_log.txt`
++versions. Bugs are still best reported as [issues](https://github.com/ffffffuck/ProjectReLink-GyroRumble/issues) with `relink_log.txt`
+ attached, so they don't get lost.
+ 
+ ![The Project ReLink launcher](docs/launcher.png)
+ 
+ **No game files are in this repository.** ReLink builds the game on your PC from your own copy.
+ 
++## Gyro and rumble
++
++This fork keeps the SDL controller rumble path and adds HD rumble for supported Switch controllers, plus the gyro deadzone
++choices and Longshot-based motion aiming. RenHDrum is not required; the built-in rumble path remains the default.
++
+ ## The game version you need
+ 
+ ReLink works with **one version of the game**: the Switch 2 remake with its update installed.
+@@ -30,7 +35,7 @@ Other versions do not work: the launcher checks your copy and says so before it
+ 
+ ## Install and play
+ 
+-1. Download `ReLink-Setup.exe` from the [latest release](https://github.com/pixl27/ProjectReLink/releases/latest).
++1. Download `ReLink-Setup.exe` from the [latest release](https://github.com/ffffffuck/ProjectReLink-GyroRumble/releases/latest).
+ 2. Run it. It downloads ReLink and its tools (about 310 MB), checks them and opens the launcher. Nothing else to install:
+    ReLink brings its own compiler and Python.
+ 3. Pick your copy of the game. The launcher looks for `.nup` files in Downloads, Desktop and Documents; you can also choose
+@@ -223,7 +228,7 @@ Switch 2) en jeu Windows natif : le code du jeu est traduit en code PC et compil
+ **Ce dépôt ne contient aucun fichier du jeu** : ReLink fabrique le jeu sur votre PC à partir de votre propre copie.
+ 
+ **Discord :** [rejoignez le serveur Project ReLink](https://discord.gg/RFNUtCQk8j) pour poser vos questions, trouver de
+-l'aide et suivre les nouvelles versions. Pour un bug, une [issue](https://github.com/pixl27/ProjectReLink/issues) avec
++l'aide et suivre les nouvelles versions. Pour un bug, une [issue](https://github.com/ffffffuck/ProjectReLink-GyroRumble/issues) avec
+ `relink_log.txt` en pièce jointe reste le meilleur moyen qu'il ne se perde pas.
+ 
+ ### La version du jeu qu'il vous faut
+@@ -234,7 +239,7 @@ d'installer quoi que ce soit.
+ 
+ ### Installer et jouer
+ 
+-1. Téléchargez `ReLink-Setup.exe` dans la [dernière version](https://github.com/pixl27/ProjectReLink/releases/latest).
++1. Téléchargez `ReLink-Setup.exe` dans la [dernière version](https://github.com/ffffffuck/ProjectReLink-GyroRumble/releases/latest).
+ 2. Lancez-le. Il télécharge ReLink et ses outils (environ 310 Mo), les vérifie et ouvre le lanceur. Rien d'autre à installer.
+ 3. Choisissez votre copie du jeu : le lanceur cherche les `.nup` dans Téléchargements, Bureau et Documents ; vous pouvez aussi
+    en choisir un, le déposer sur la fenêtre, ou donner les dossiers `romfs` et `exefs`.
+diff --git a/docs/releasing.md b/docs/releasing.md
+index afd47c4..0488da8 100644
+--- a/docs/releasing.md
++++ b/docs/releasing.md
+@@ -22,6 +22,10 @@ https://recomplauncher.com/schema/recomplauncher.json.
+ 
+ ## The seed: the first release, new tools, a new play profile
+ 
++For the first release of this fork, set the repository variable `BOOTSTRAP_REPO` to `pixl27/ProjectReLink`. The workflow uses
++the upstream release's build-tool parts and profile, then publishes copies under this repository's `builder-parts` release.
++Later releases use this fork's own parts automatically.
++
+ The setup installs six parts. Three are made from this repository at every release: the launcher with the sources and the
+ play profile (`app`), .NET's runtime (`dotnet`) and `third_party`. llvm-mingw, the compiler, comes from its own official
+ release. The other two are tools that change rarely and are not rebuilt in CI: Python with the build's modules (`python`)
+diff --git a/gpu/vk/vk_api.h b/gpu/vk/vk_api.h
+index 6f326ca..7b1f72e 100644
+--- a/gpu/vk/vk_api.h
++++ b/gpu/vk/vk_api.h
+@@ -19,7 +19,7 @@ extern "C" {
+ enum { HOS_OPT_CHEAT_HEARTS = 32, HOS_OPT_CHEAT_FLIGHT, HOS_OPT_CHEAT_ACTION, HOS_OPT_CHEAT_CAMERA };
+ /* (relink) the Controls tab's motion rows (host/pad_sdl.c reads them, vk_replay.cpp's option answers them): Motion
+    controls on or off, the horizontal's and the vertical's sensitivity in percent, and each turned around */
+-enum { HOS_OPT_GYRO = 18, HOS_OPT_GYRO_SENS_X, HOS_OPT_GYRO_INV_X, HOS_OPT_GYRO_INV_Y, HOS_OPT_GYRO_SENS_Y };
++enum { HOS_OPT_GYRO = 18, HOS_OPT_GYRO_SENS_X, HOS_OPT_GYRO_INV_X, HOS_OPT_GYRO_INV_Y, HOS_OPT_GYRO_SENS_Y, HOS_OPT_GYRO_DEADZONE };
+ /* (relink) NVIDIA DLSS's camera jitter (host/rx_backend.c, gpu/vk/vk_dlss.cpp): the scene's width and height while DLSS
+    draws, 0 when there is to be no jitter, and the jitter sequence's length. 24 on: 18 to 22 are the motion rows' */
+ enum { HOS_OPT_DLSS_JITTER_W = 24, HOS_OPT_DLSS_JITTER_H, HOS_OPT_DLSS_JITTER_PHASES };
+diff --git a/gpu/vk/vk_menu.cpp b/gpu/vk/vk_menu.cpp
+index eb5c6c4..2fc3627 100644
+--- a/gpu/vk/vk_menu.cpp
++++ b/gpu/vk/vk_menu.cpp
+@@ -81,6 +81,10 @@ const char* tx_framegen(int v) {
+     return t[v];
+ }
+ const char* tx_onoff(int v) { return v ? "On" : "Off"; }
++const char* tx_deadzone(int v) {
++    static const char* t[] = {"Low", "Standard", "High"};
++    return t[v < 0 ? 0 : v > 2 ? 2 : v];
++}
+ // (relink) Motion controls: the choice, and whether a connected controller has a gyroscope (host/pad_sdl.c). Either can be
+ // chosen whatever is connected: a pad plugged in later is read when it comes
+ const char* tx_gyro(int v) {
+@@ -532,7 +536,7 @@ Row rows[] = {
+      "What the ocarina hears when the game's microphone option is on (playing an instrument, or humming).", hn_mic, false,
+      true},
+ 
+-    // Controls (14 rows)
++    // Controls (15 rows)
+     {TAB_CONTROLS, "Controller in background", &opts.pad_background, 0, 1, 1, tx_onoff,
+      "Whether the controller plays the game while another window has the focus.", hn_background},
+     {TAB_CONTROLS, "Mouse camera", &opts.mouse_native, 0, 1, 1, tx_mousecam, "How the captured mouse turns the camera.",
+@@ -560,6 +564,8 @@ Row rows[] = {
+      nullptr, false, true},
+     {TAB_CONTROLS, "Invert motion Y", &opts.gyro_inv_y, 0, 1, 1, tx_onoff, "Turns the motion aim's up and down around.",
+      nullptr, false, true},
++    {TAB_CONTROLS, "Motion deadzone", &opts.gyro_deadzone, 0, 2, 1, tx_deadzone,
++     "How much tiny controller movement is ignored: Low is most sensitive; High filters more drift.", nullptr, false, true},
+     {TAB_CONTROLS, "Layout preset", &opts.pad_layout, 0, 3, 1, tx_pad_layout,
+      "Which face button is which. Binding one yourself on the Controls page makes it Custom.", hn_pad_layout},
+     {TAB_CONTROLS, "Controls", nullptr, 0, 0, 0, nullptr,   // (relink: opens its page)
+diff --git a/gpu/vk/vk_menu.h b/gpu/vk/vk_menu.h
+index daae336..268fbfa 100644
+--- a/gpu/vk/vk_menu.h
++++ b/gpu/vk/vk_menu.h
+@@ -40,6 +40,7 @@ struct Options {
+     int gyro_sens_y = 100;   // the motion aim's vertical sensitivity in percent
+     int gyro_inv_x = 0;   // the motion aim's horizontal turned around
+     int gyro_inv_y = 0;   // the motion aim's vertical turned around
++    int gyro_deadzone = 1; // the motion aim's zero-drift threshold: 0 Low, 1 Standard, 2 High
+     int robust = 0;       // bounds-checked buffer access: 0 Auto (on), 1 Off, 2 On (gpu/vk/vk_main.cpp; RX_VK_ROBUST)
+     int preset = 0;       // quality preset: 0 Custom, 1 Minimum (4GB), 2 Low (6GB), 3 Balanced (8GB), 4 High (12GB), 5 Ultra (16GB+)
+     int vram_mb = 0;      // dynamic texture cache budget limit in MB
+diff --git a/gpu/vk/vk_replay.cpp b/gpu/vk/vk_replay.cpp
+index 115bef7..52852e5 100644
+--- a/gpu/vk/vk_replay.cpp
++++ b/gpu/vk/vk_replay.cpp
+@@ -4439,7 +4439,7 @@ void fill_replay_table(MkwVkRenderer& t) {
+         if (id == HOS_OPT_CHEAT_ACTION) return menu_take_cheat_action();
+         if (id == HOS_OPT_CHEAT_CAMERA) return menu_free_camera();
+         return id == 0 ? opts.realtime : id == 1 ? menu_is_open() : id == 2 ? resolution_auto() && !dlss_full_scale() : id == 3 ? (dlss_full_scale() ? 10000 : resolution_scale()) : id == 4 ? opts.pad_background : id == 5 ? opts.text_speed : id == 6 ? opts.mouse_native :
+-               id == 7 ? opts.mouse_sens : id == 8 ? opts.mouse_invert : id == 9 ? opts.rumble : id == 16 ? opts.invert_cam_x : id == 17 ? opts.invert_cam_y : id == HOS_OPT_GYRO ? opts.gyro : id == HOS_OPT_GYRO_SENS_X ? opts.gyro_sens_x : id == HOS_OPT_GYRO_SENS_Y ? opts.gyro_sens_y : id == HOS_OPT_GYRO_INV_X ? opts.gyro_inv_x : id == HOS_OPT_GYRO_INV_Y ? opts.gyro_inv_y :
++               id == 7 ? opts.mouse_sens : id == 8 ? opts.mouse_invert : id == 9 ? opts.rumble : id == 16 ? opts.invert_cam_x : id == 17 ? opts.invert_cam_y : id == HOS_OPT_GYRO ? opts.gyro : id == HOS_OPT_GYRO_SENS_X ? opts.gyro_sens_x : id == HOS_OPT_GYRO_SENS_Y ? opts.gyro_sens_y : id == HOS_OPT_GYRO_INV_X ? opts.gyro_inv_x : id == HOS_OPT_GYRO_INV_Y ? opts.gyro_inv_y : id == HOS_OPT_GYRO_DEADZONE ? opts.gyro_deadzone :
+                id == HOS_OPT_DLSS_JITTER_W || id == HOS_OPT_DLSS_JITTER_H ? (int)dlss_jitter_size(id - HOS_OPT_DLSS_JITTER_W) :
+                id == HOS_OPT_DLSS_JITTER_PHASES ? (int)dlss_jitter_size(2) : 0;
+     };
+diff --git a/host/hd_rumble.h b/host/hd_rumble.h
+new file mode 100644
+index 0000000..c88de5b
+--- /dev/null
++++ b/host/hd_rumble.h
+@@ -0,0 +1,150 @@
++/* HD rumble for Nintendo Switch Pro Controllers and Joy-Cons, through SDL's effect call (host/pad_sdl.c).
++
++   The game's vibration values (nn::hid VibrationValue: {amp_low, freq_low, amp_high, freq_high}, amplitudes 0 to 1,
++   frequencies in Hz, one per side of the controller) are what the Switch sends its controllers, so a Switch controller
++   can play them, both bands at their own frequency and on their own side, instead of two motor strengths.
++   SDL's Switch driver (src/joystick/hidapi/SDL_hidapi_switch.c, SDL 3.2 on: HIDAPI_DriverSwitch_SendJoystickEffect)
++   takes a whole rumble output report, 0x10, packet number, then 4 bytes per side, and writes it in place of its own
++   rumble. SDL2's own driver and the other SDL drivers (Switch 2 controllers, the kernel's hid-nintendo, joysticks
++   SDL combined, such as a Joy-Con pair) refuse it: those pads keep the motor path.
++
++   The encoding is the one documented by the community's reverse engineering (Switchbrew's HID "Rumble data" page;
++   dekuNukem's Nintendo_Switch_Reverse_Engineering rumble_data_table.md, written from its formulas and tables):
++   - a frequency's code is round(log2(Hz / 10) * 32); the high band takes code - 0x60 times 4 (0x004 to 0x1FC, 9 bits:
++     81.75 to 1252.57 Hz), the low band code - 0x40 (0x01 to 0x7F: 40.88 to 626.29 Hz);
++   - an amplitude's code, 0 to 100 (0 to 1.003), is round(log2(8.7 a) * 32) from 32 up, round(log2(17 a) * 16) from 16
++     to 31, and below that the table's 2^(1/4) steps (a = 2^(code / 4) / 119.6, code 1 = 0.0078); the high band takes
++     code * 2, the low band code / 2 + 0x40 with the code's odd bit as its 9th bit (0x8000). Codes over 100 are past what
++     the table calls safe for the actuators: 100 is the top, as SDL's own table stops there;
++   - the 4 bytes of a side: high frequency's low 8 bits; high amplitude | the high frequency's 9th bit; low frequency |
++     the low amplitude's 9th bit (0x80); the low amplitude's low 8 bits. Silence is 00 01 40 40 (both bands at 0, at
++     320 and 160 Hz), as SDL sends it.
++
++   Pure (no state, no SDL): tests/test_hd_rumble.py compiles it. */
++#pragma once
++#include <math.h>
++#include <stdint.h>
++#include <string.h>
++
++#define HD_RUMBLE_PACKET_SIZE 10          /* (SDL's SwitchCommonOutputPacket_t: type, number, 2 x 4 bytes) */
++#define HD_RUMBLE_REPORT 0x10             /* (k_eSwitchOutputReportIDs_Rumble) */
++#define HD_RUMBLE_AMP_TOP 100             /* the amplitude code 1.003 has: the top the table calls safe */
++#define HD_RUMBLE_GAP_NS 32000000LL       /* the least time between two packets (SDL: 30 ms; faster can turn a
++                                             Bluetooth controller off, or the motors miss them over USB) */
++#define HD_RUMBLE_REFRESH_NS 40000000LL   /* a rumble that goes on is sent again this often (SDL refreshes its own
++                                             every 50 ms: the controller stops one it is not sent again) */
++
++/* What kind of Switch controller SDL says a pad is: 0 none of them (the motor path), else the side(s) it has. */
++enum { HD_RUMBLE_NONE, HD_RUMBLE_PRO, HD_RUMBLE_JOYCON_LEFT, HD_RUMBLE_JOYCON_RIGHT, HD_RUMBLE_JOYCON_PAIR };
++/* From SDL_GetGamepadType (SDL3: SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO 7, then JOYCON_LEFT, RIGHT, PAIR) or
++   SDL_GameControllerGetType (SDL2: SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO 5, JOYCON_LEFT 11, RIGHT 12, PAIR 13). */
++static inline int hd_rumble_kind(int sdl_version, int type) {
++    if (sdl_version == 3) return type >= 7 && type <= 10 ? HD_RUMBLE_PRO + (type - 7) : HD_RUMBLE_NONE;
++    if (sdl_version == 2) return type == 5 ? HD_RUMBLE_PRO : type >= 11 && type <= 13 ? HD_RUMBLE_JOYCON_LEFT + (type - 11) : HD_RUMBLE_NONE;
++    return HD_RUMBLE_NONE;
++}
++
++/* A frequency's code, round(log2(Hz / 10) * 32), kept to [lo, hi]; a frequency that is not one (0, NaN) gets
++   otherwise. */
++static inline int hd_rumble_freq_code(float hz, int lo, int hi, int otherwise) {
++    if (!(hz > 0.0f)) return otherwise;   /* (also NaN) */
++    const double c = floor(log2((double)hz / 10.0) * 32.0 + 0.5);
++    return c < lo ? lo : c > hi ? hi : (int)c;
++}
++/* An amplitude's code, 0 to HD_RUMBLE_AMP_TOP (see above). */
++static inline int hd_rumble_amp_code(float amp) {
++    if (!(amp > 0.0f)) return 0;   /* (also NaN) */
++    double c;
++    if (amp > 0.2275f) c = floor(log2(8.7 * amp) * 32.0 + 0.5);             /* (between codes 31 and 32: 0.225, 0.230) */
++    else if (amp > 0.1150f) c = floor(log2(17.0 * amp) * 16.0 + 0.5);       /* (15 and 16: 0.112, 0.117) */
++    else if (amp >= 0.0039f) c = floor(4.0 * log2(119.6 * amp) + 0.5);       /* (half of code 1's 0.0078: less is 0) */
++    else return 0;
++    if (c < 1) c = 1;   /* (code 1, 0.0078, is off the 2^(1/4) steps: the smallest that plays) */
++    return c > HD_RUMBLE_AMP_TOP ? HD_RUMBLE_AMP_TOP : (int)c;
++}
++
++/* (issue 263, for HD rumble) The game's amplitudes as a Switch controller is to play them: OoT scales its rumble files
++   by small gains (romfs RSDB/RumbleCall: 0.015 to 0.5, most effects 0.05 to 0.2), so what it asks for is mostly 0.02 to
++   0.1 and played as it is a Pro Controller's actuators hardly move (a heart caught, 0.06 at 55 Hz, is not felt). Each
++   band goes through the same curve as the motors' (nn_hid.c's rumble_motor, from Eden's SDL driver): (a + a^0.35) / 2,
++   which keeps 0 and 1 and the order of the strengths (0.03 -> 0.16, 0.06 -> 0.22, 0.2 -> 0.38, 0.5 -> 0.64); what is
++   below the encoding's smallest step (half of code 1) stays silent. Frequencies are kept. */
++static inline float hd_rumble_felt_amp(float amp) {
++    if (!(amp >= 0.0039f)) return 0.0f;   /* (also NaN) */
++    const float felt = (amp + powf(amp, 0.35f)) * 0.5f;
++    return felt > 1.0f ? 1.0f : felt;
++}
++static inline void hd_rumble_felt(const float v[4], float out[4]) {
++    out[0] = hd_rumble_felt_amp(v[0]), out[1] = v[1];
++    out[2] = hd_rumble_felt_amp(v[2]), out[3] = v[3];
++}
++
++/* (a single Joy-Con) both sides' values as one: each band at the stronger side's amplitude, with that side's frequency
++   (the left's when they are equal). The game always sees a full Pro Controller and may send an effect to one side only;
++   a lone Joy-Con has one side, and plays what either side asks for, as the motor path's max of the two sides does. */
++static inline void hd_rumble_merge(const float left[4], const float right[4], float out[4]) {
++    for (int b = 0; b < 4; b += 2) {
++        const int r = right[b] > left[b];   /* (NaN: not stronger, the left kept) */
++        out[b] = r ? right[b] : left[b], out[b + 1] = r ? right[b + 1] : left[b + 1];
++    }
++}
++
++/* The silent side, 00 01 40 40. */
++static inline void hd_rumble_neutral(uint8_t out[4]) {
++    out[0] = 0x00, out[1] = 0x01, out[2] = 0x40, out[3] = 0x40;
++}
++/* One side's 4 bytes from the game's value {amp_low, freq_low, amp_high, freq_high}, its amplitudes scaled by percent
++   (100 the game's own, 0 silence). Over 100, both bands get the same factor, the stronger stopping at 1 (as the motors'
++   strength does: the bands keep their balance), and the top stays HD_RUMBLE_AMP_TOP. */
++static inline void hd_rumble_encode(const float v[4], int percent, uint8_t out[4]) {
++    float scale = percent > 0 ? (float)percent / 100.0f : 0.0f;
++    const float top = v[0] > v[2] ? v[0] : v[2];
++    if (scale > 1.0f && top * scale > 1.0f) scale = top > 1.0f ? 1.0f : 1.0f / top;   /* (NaN: not above, kept) */
++    const int la = hd_rumble_amp_code(v[0] * scale), ha = hd_rumble_amp_code(v[2] * scale);
++    if (!la && !ha) {
++        hd_rumble_neutral(out);
++        return;
++    }
++    const int lf = hd_rumble_freq_code(v[1], 0x41, 0xBF, 0x80) - 0x40;          /* (160 Hz when it has none) */
++    const int hf = (hd_rumble_freq_code(v[3], 0x61, 0xDF, 0xA0) - 0x60) * 4;    /* (320 Hz) */
++    const int ha2 = ha * 2, la9 = ((la & 1) << 15) | (la / 2 + 0x40);
++    out[0] = (uint8_t)(hf & 0xFF);
++    out[1] = (uint8_t)(ha2 | ((hf >> 8) & 0x01));
++    out[2] = (uint8_t)(lf | ((la9 >> 8) & 0x80));
++    out[3] = (uint8_t)(la9 & 0xFF);
++}
++
++/* The packet SDL's effect call takes, from the game's left and right sides' bytes: a Pro Controller (and a pair)
++   plays each side on its own; a single Joy-Con plays its own side (SDL's packet has both: it gets it in both). For a
++   single Joy-Con, host/pad_sdl.c passes the two sides merged (hd_rumble_merge) as both. */
++static inline void hd_rumble_packet(int kind, const uint8_t left[4], const uint8_t right[4], uint8_t out[HD_RUMBLE_PACKET_SIZE]) {
++    out[0] = HD_RUMBLE_REPORT;
++    out[1] = 0;   /* (SDL numbers the packets itself) */
++    const uint8_t *l = kind == HD_RUMBLE_JOYCON_RIGHT ? right : left, *r = kind == HD_RUMBLE_JOYCON_LEFT ? left : right;
++    memcpy(out + 2, l, 4);
++    memcpy(out + 6, r, 4);
++}
++static inline int hd_rumble_silent(const uint8_t packet[HD_RUMBLE_PACKET_SIZE]) {
++    static const uint8_t n[4] = {0x00, 0x01, 0x40, 0x40};
++    return !memcmp(packet + 2, n, 4) && !memcmp(packet + 6, n, 4);
++}
++
++/* Whether a pad's packet goes out now: packet the one the game asks for, sent the last one sent (silence before the
++   first), sent_ns when, ever whether there was one. Never sooner than HD_RUMBLE_GAP_NS after the last; a change goes
++   at once, then the latest when the gap is over (what the game asks for in between is not sent: a newer value takes its
++   place); a rumble that goes on is sent again every HD_RUMBLE_REFRESH_NS; silence that was sent is not sent again. */
++static inline int hd_rumble_due(const uint8_t packet[HD_RUMBLE_PACKET_SIZE], const uint8_t sent[HD_RUMBLE_PACKET_SIZE],
++                                int ever, long long now, long long sent_ns) {
++    if (ever && now - sent_ns < HD_RUMBLE_GAP_NS) return 0;
++    if (memcmp(packet + 2, sent + 2, 8)) return 1;
++    return ever && !hd_rumble_silent(sent) && now - sent_ns >= HD_RUMBLE_REFRESH_NS;
++}
++
++/* A pad's HD rumble state, as the poll moves it: unknown until its first packet; on while SDL takes them; off (the
++   motor path, for as long as the pad is open) once SDL refuses one, or when it has no effect call, is no Switch
++   controller, or HOS_HD_RUMBLE=0. */
++enum { HD_RUMBLE_UNKNOWN, HD_RUMBLE_ON, HD_RUMBLE_OFF };
++static inline int hd_rumble_start(int kind, int have_call, int env_off) {
++    return kind != HD_RUMBLE_NONE && have_call && !env_off ? HD_RUMBLE_UNKNOWN : HD_RUMBLE_OFF;
++}
++static inline int hd_rumble_after_send(int ok) { return ok ? HD_RUMBLE_ON : HD_RUMBLE_OFF; }
+diff --git a/host/hos_motion.h b/host/hos_motion.h
+index 7b6f3fe..382f21f 100644
+--- a/host/hos_motion.h
++++ b/host/hos_motion.h
+@@ -1,22 +1,27 @@
+-/* (relink) A controller's motion sensors as OoT reads its six-axis state (host/pad_sdl.c fills it from SDL,
+-   host/nn_hid.c hands it to the game's GetSixAxisSensorStates). Header-only, no SDL or Windows, so
++/* (longshot) A controller's motion sensors as the Switch reports its six-axis state (host/pad_sdl.c fills it from
++   SDL, host/nn_hid.c hands it to the game's GetSixAxisSensorStates). Header-only, no SDL or Windows, so
+    tests/test_motion.py runs it as it is.
+ 
+-   OoT does not read the six-axis state as a plain sensor. What it aims with was found by spluton (issue 112, "Gyro
+-   aiming from SDL pads", tested on a DualSense) and corrected by Link-22 (the yaw rate's unit, tested on a GameSir T3
+-   Pro in Switch Pro mode, and the same feel as Eden on that pad):
+-   - the horizontal aim is the yaw rate, in the angular velocity's y slot, in turns a second (SDL's rad/s over 2 pi);
+-   - the vertical aim is the direction matrix, as a pure tilt about x (Rx(pitch)), the pitch rate integrated on its own;
+-   - the game folds the angles, the pitch rate and the acceleration into an aim recenter that cancels the tilt unless
+-     they are neutral: the angles and the pitch rate go out zero, the acceleration at rest (0, 0, -1).
+-   The rates are the pad's own, measured about the world's axes: an up vector from a complementary filter (the gyro's
+-   prediction pulled toward the measured gravity while it reads 0.65 to 1.35 G), the gyro projected onto right
+-   (pitch), up (yaw) and forward (roll). That makes the way the pad is held irrelevant: flat or upright, a turn toward
+-   the ceiling is up. The gyroscope's resting rate (its bias) is learned while the pad is still (both sensors steady, not
+-   merely slow) and taken off, and the vertical aim is pulled gently toward the tilt gravity measures, so it cannot drift.
++   This is Eden's (and yuzu's) motion, the emulators OoT aims right with: SDL's readings turned into the Switch's frame
++   and units, and the state built as the console builds it, so the game gets what it gets on hardware and does its own
++   aiming (it recenters on the camera each time it aims; how the pad is held, in bed or at a desk, does not matter):
++   - acceleration in G and angular velocity in turns a second, in the Switch's frame (Eden's sdl_driver.cpp:
++     x = -X, y = Z, z = -Y for the accelerometer, x = X, y = -Z, z = Y for the gyroscope, SDL's +X right, +Y out of the
++     face buttons, +Z toward the player), so a pad lying face up reads (0, 0, -1) G;
++   - the rotation: the angular velocity summed (turns);
++   - the direction: the pad's orientation as a 3x3 matrix, from Mahony's filter (the gyroscope integrated as a
++     quaternion, pulled toward the measured gravity: kp 0.3, ki 0.005), Eden's motion_input.cpp line for line.
++   The gyroscope's resting rate (its bias) is learned while the pad is still on a table (both sensors steady) and
++   taken off, and rates under 0.007 turns a second count as none, as the console's standard zero-drift mode does (the
++   Motion deadzone row: Low and High are its tight 0.002 and loose 0.01).
++   Motion sensitivity X/Y and Invert motion X/Y scale the angular velocity before it is used: its part about the
++   world's up (the turn, X) and the rest (the tilt, Y). At 100% and not inverted the state is Eden's own. Earlier
++   versions sent a partial state (a yaw rate and a tilt matrix, the rest neutral, spluton's and Link-22's findings in
++   issue 112), and every way the pad could be held at the start needed its own case; the full state needs none.
+ 
+-   Everything is in SDL's gamepad frame (+X right, +Y up out of the face buttons, +Z toward the player; m/s^2 and
+-   rad/s). The defaults are the two testers': the yaw rate as is (turning left aims left), the pitch rate negated. */
++   The filter, the frame and the orientation matrix follow Eden's src/hid_core/frontend/motion_input.cpp and
++   src/input_common/drivers/sdl_driver.cpp (Copyright 2020 yuzu Emulator Project, GPL-2.0-or-later; Copyright 2026 Eden
++   Emulator Project, GPL-3.0-or-later), as this project is GPL-3.0. */
+ #pragma once
+ #include <math.h>
+ #include <stdint.h>
+@@ -26,10 +31,10 @@
+ #define HOS_MOTION_TAU 6.28318531f
+ 
+ typedef struct {
+-    float accel[3];       /* G (at rest, always: the game folds it into its recenter) */
+-    float gyro[3];        /* turns a second: the yaw rate in y, x and z zero */
+-    float rotation[3];    /* turns: zero (the game folds them into its recenter) */
+-    float direction[9];   /* rows: Rx(pitch), the vertical aim */
++    float accel[3];       /* G, the Switch's frame */
++    float gyro[3];        /* turns a second */
++    float rotation[3];    /* turns */
++    float direction[9];   /* rows: the orientation */
+ } HosMotionState;
+ 
+ /* one reading's state as GetSixAxisSensorStates hands it out: n counts the readings, dt_ns is the time since the one
+@@ -41,149 +46,217 @@ typedef struct {
+ #define HOS_MOTION_HISTORY 32
+ 
+ typedef struct {
+-    float bias[3];   /* rad/s, SDL's axes */
+-    float still_t;   /* seconds the pad has been still (bias learning starts after HOS_MOTION_STILL_S) */
+-    float learned_t; /* seconds of stillness learned from so far (fast at first, then slowly) */
+-    float gmean[3], gvar;   /* the gyro's short-window mean (rad/s) and variance (summed over its axes) */
+-    float amean, avar;      /* the accelerometer's magnitude, the same way (G) */
+-    int stats_ready;
+-    float last_accel[3], last_gyro[3];   /* (the last reading: a repeat of it is no new reading) */
+-    float pending_dt;                    /* (time from repeats, carried into the next new reading) */
+-    float up[3];     /* the world's up in the pad's frame (unit) */
+-    int up_ready;
+-    float pitch;     /* radians, the vertical aim's tilt */
+-    float tilt0;     /* radians, the pad's tilt about its x axis when the filter started (the aim's level) */
+-    int tilt_ready;
+-    float rates[3];  /* (for tests and logs) pitch, yaw, roll about the world's axes, rad/s */
++    float quat[4];        /* x, y, z, w (Eden's order): the real orientation, Eden's filter on the real rates */
++    float quat_out[4];    /* the orientation handed out: integrated from the rates as Motion sensitivity and Invert
++                             motion scale them, with the real filter's drift correction (the same as quat at 100%) */
++    float real_error[3], integral_error[3];
++    float bias[3];        /* turns a second, the Switch's frame */
++    float learned_t;      /* seconds of stillness learned from (fast at first, then slowly) */
++    float still_t;        /* seconds still */
++    float gmean[3], gvar, avec[3], avar, amean;   /* the short window's means and variances (stillness) */
++    int stats_ready, only_accelerometer, reset_counter;
++    float last_accel[3], last_gyro[3], pending_dt;
++    float threshold;      /* turns a second, the deadzone (0: HOS_MOTION_THRESHOLD) */
++    float up[3];          /* the world's up in the Switch's frame (from the accelerometer, smoothed: for the split of
++                             the angular velocity into turn and tilt) */
+     HosMotionState out;
+ } HosMotion;
+ 
+-/* stillness: the gyro's spread under HOS_MOTION_STILL_GYRO rad/s and the accelerometer's under HOS_MOTION_STILL_ACCEL
+-   G, about 1 G, for HOS_MOTION_STILL_S. A hand never holds that steady (its tremor alone is several times more), so a
+-   slow, steady turn is aim, not bias, however slow; and an offset of any size is learned on a table. */
+-#define HOS_MOTION_STILL_GYRO 0.01f
+-#define HOS_MOTION_STILL_ACCEL 0.01f
++#define HOS_MOTION_STILL_GYRO 0.015f    /* rad/s, summed over three axes (about 0.009 on each) */
++#define HOS_MOTION_STILL_ACCEL 0.0173f  /* G, the same way (0.01 on each) */
+ #define HOS_MOTION_STILL_S 0.5f
+-#define HOS_MOTION_WINDOW_S 0.2f   /* (the short window's time constant) */
+-#define HOS_MOTION_DT_MAX 0.1f     /* (a longer gap, a hitch, counts as this long) */
+-#define HOS_MOTION_TILT_S 1.0f     /* (the vertical aim's pull toward the measured tilt) */
+-#define HOS_MOTION_TILT_ROLL 0.25f /* (... only while |up[0]| is under this: about 15 degrees of roll) */
++#define HOS_MOTION_WINDOW_S 0.2f
++#define HOS_MOTION_DT_MAX 0.1f          /* (Eden ignores a longer gap) */
++#define HOS_MOTION_THRESHOLD 0.007f     /* turns a second: less is none (the console's standard zero-drift mode) */
++#define HOS_MOTION_THRESHOLD_TIGHT 0.002f   /* (its tight and loose modes: the Motion deadzone row's Low and High) */
++#define HOS_MOTION_THRESHOLD_LOOSE 0.01f
+ 
+-static inline void hos_motion_rest(HosMotionState *o, float pitch) {
++static inline void hos_motion_rest(HosMotionState *o) {
+     memset(o, 0, sizeof *o);
+     o->accel[2] = -1;
+-    const float c = cosf(pitch), s = sinf(pitch);
+-    const float r[9] = {1, 0, 0, 0, c, -s, 0, s, c};
+-    memcpy(o->direction, r, sizeof r);
++    o->direction[0] = o->direction[4] = o->direction[8] = 1;
+ }
+ 
+ static inline void hos_motion_reset(HosMotion *m) {
+     memset(m, 0, sizeof *m);
+-    m->up[1] = 1;
+-    hos_motion_rest(&m->out, 0);
++    m->quat[2] = -1;   /* (Eden's ResetQuaternion: {0, 0, -1, 0}) */
++    m->quat_out[2] = -1;
++    m->only_accelerometer = 1;
++    m->up[2] = 1;
++    hos_motion_rest(&m->out);
+ }
+ 
+-static inline float hos_motion_wrap(float a) {
+-    while (a > 3.14159265f) a -= HOS_MOTION_TAU;
+-    while (a < -3.14159265f) a += HOS_MOTION_TAU;
+-    return a;
++static inline float hos_motion_len(const float v[3]) { return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
++
++/* a quaternion (Eden's x, y, z, w) turned at Eden's filter rate rg for period seconds */
++static inline void hos_motion_integrate(float quat[4], const float rg[3], float period) {
++    float q1 = quat[3], q2 = quat[0], q3 = quat[1], q4 = quat[2];
++    const float gx = rg[1], gy = rg[0], gz = rg[2];
++    const float pa = q2, pb = q3, pc = q4;
++    q1 = q1 + (-q2 * gx - q3 * gy - q4 * gz) * (0.5f * period);
++    q2 = pa + (q1 * gx + pb * gz - pc * gy) * (0.5f * period);
++    q3 = pb + (q1 * gy - pa * gz + pc * gx) * (0.5f * period);
++    q4 = pc + (q1 * gz + pa * gy - pb * gx) * (0.5f * period);
++    const float n = sqrtf(q1 * q1 + q2 * q2 + q3 * q3 + q4 * q4);
++    if (n > 0) quat[3] = q1 / n, quat[0] = q2 / n, quat[1] = q3 / n, quat[2] = q4 / n;
++}
++static inline void hos_motion_rate(const HosMotion *m, const float gyro[3], float rg[3]) {   /* (Eden's swap, rad/s) */
++    rg[0] = gyro[1] * HOS_MOTION_TAU, rg[1] = -gyro[0] * HOS_MOTION_TAU, rg[2] = -gyro[2] * HOS_MOTION_TAU;
++    if (m->only_accelerometer) rg[0] = rg[1] = rg[2] = 0;
++}
++
++/* Mahony's filter on the real quaternion, Eden's UpdateOrientation (period: seconds; gain 10: the settling of
++   SetOrientationFromAccelerometer). Returns the feedback it added to the rate, in *corr (rad/s, the filter's frame), so
++   the handed-out orientation can lose the same drift. */
++static inline void hos_motion_mahony(HosMotion *m, const float accel[3], const float gyro[3], float period, float gain,
++                                     float corr[3]) {
++    const float q1 = m->quat[3], q2 = m->quat[0], q3 = m->quat[1], q4 = m->quat[2];
++    const float alen = hos_motion_len(accel);
++    float rg[3];
++    hos_motion_rate(m, gyro, rg);
++    if (gain > 1) rg[0] = rg[1] = rg[2] = 0;
++    corr[0] = corr[1] = corr[2] = 0;
++    if ((alen >= 0.75f && alen <= 1.25f) || gain > 1) {
++        const float ax = -accel[0] / alen, ay = accel[1] / alen, az = -accel[2] / alen;
++        const float vx = 2.0f * (q2 * q4 - q1 * q3);
++        const float vy = 2.0f * (q1 * q2 + q3 * q4);
++        const float vz = q1 * q1 - q2 * q2 - q3 * q3 + q4 * q4;
++        const float e[3] = {az * vx - ax * vz, ay * vz - az * vy, ax * vy - ay * vx};
++        memcpy(m->real_error, e, sizeof e);
++        if (gain <= 1 && hos_motion_len(e) >= 0.05f)
++            for (int i = 0; i < 3; i++) m->integral_error[i] += e[i];
++        else if (gain <= 1)
++            memset(m->integral_error, 0, sizeof m->integral_error);
++        const float kp = 0.3f, ki = 0.005f;
++        const float wp = gain > 1 ? 10 : m->only_accelerometer ? 35 : 1, wi = gain > 1 ? 5 : m->only_accelerometer ? 10 : 1;
++        for (int i = 0; i < 3; i++) corr[i] = wp * kp * e[i] + wi * ki * m->integral_error[i];
++    }
++    for (int i = 0; i < 3; i++) rg[i] += corr[i];
++    hos_motion_integrate(m->quat, rg, period);
++}
++
++/* the orientation matrix, Eden's GetOrientation (its quaternion's matrix, with its sign changes) */
++static inline void hos_motion_direction(const float quat[4], float d[9]) {
++    const float x = -quat[1], y = -quat[0], z = -quat[3], w = -quat[2];
++    const float x2 = x * x, y2 = y * y, z2 = z * z, xy = x * y, wz = w * z, xz = x * z, wy = w * y, yz = y * z, wx = w * x;
++    const float mm[9] = {1 - 2 * (y2 + z2), 2 * (xy + wz), 2 * (xz - wy), 2 * (xy - wz), 1 - 2 * (x2 + z2), 2 * (yz + wx),
++                         2 * (xz + wy), 2 * (yz - wx), 1 - 2 * (x2 + y2)};
++    d[0] = mm[0], d[1] = mm[1], d[2] = -mm[2];
++    d[3] = mm[3], d[4] = mm[4], d[5] = -mm[5];
++    d[6] = -mm[6], d[7] = -mm[7], d[8] = mm[8];
+ }
+ 
+ /* One reading: SDL's accelerometer (m/s^2) and gyroscope (rad/s), dt seconds after the last one. sens_h and sens_v
+-   scale the horizontal and the vertical aim (1: as the pad turns); inv_h and inv_v turn them the other way. Returns 0
+-   for a repeat of the last reading (no new reading: its time goes into the next), 1 otherwise. */
+-static inline int hos_motion_update(HosMotion *m, const float accel[3], const float gyro[3], float dt, float sens_h,
+-                                    float sens_v, int inv_h, int inv_v) {
++   scale the turn and the tilt (1: as the pad turns); inv_h and inv_v turn them the other way. Returns 0 for a repeat
++   of the last reading (no new reading: its time goes into the next), 1 otherwise. */
++static inline int hos_motion_update(HosMotion *m, const float accel_sdl[3], const float gyro_sdl[3], float dt,
++                                    float sens_h, float sens_v, int inv_h, int inv_v) {
+     if (!(dt >= 0)) dt = 0;
+-    if (m->stats_ready && !memcmp(accel, m->last_accel, sizeof m->last_accel) &&
+-        !memcmp(gyro, m->last_gyro, sizeof m->last_gyro)) {
++    if (m->stats_ready && !memcmp(accel_sdl, m->last_accel, sizeof m->last_accel) &&
++        !memcmp(gyro_sdl, m->last_gyro, sizeof m->last_gyro)) {
+         m->pending_dt += dt;
+         return 0;
+     }
+-    memcpy(m->last_accel, accel, sizeof m->last_accel), memcpy(m->last_gyro, gyro, sizeof m->last_gyro);
++    memcpy(m->last_accel, accel_sdl, sizeof m->last_accel), memcpy(m->last_gyro, gyro_sdl, sizeof m->last_gyro);
+     dt += m->pending_dt, m->pending_dt = 0;
+-    if (dt > HOS_MOTION_DT_MAX) dt = HOS_MOTION_DT_MAX;   /* (a hitch: its time, up to a limit) */
+-    const float alen = sqrtf(accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2]);
+-    const float ag = alen / HOS_MOTION_G;
+-    /* the bias: learned from the short window's mean while the pad is still (both sensors steady, about 1 G) */
++    /* the Switch's frame and units (Eden's sdl_driver.cpp), clamped as Eden clamps them */
++    float a[3] = {-accel_sdl[0] / HOS_MOTION_G, accel_sdl[2] / HOS_MOTION_G, -accel_sdl[1] / HOS_MOTION_G};
++    float g[3] = {gyro_sdl[0] / HOS_MOTION_TAU, -gyro_sdl[2] / HOS_MOTION_TAU, gyro_sdl[1] / HOS_MOTION_TAU};
++    for (int i = 0; i < 3; i++) {
++        a[i] = a[i] < -7 ? -7 : a[i] > 7 ? 7 : a[i];
++    }
++    const float alen = hos_motion_len(a);
++    /* stillness: the short window's spread of both sensors (rad/s and G, summed over the axes), about 1 G */
+     if (!m->stats_ready) {
+-        memcpy(m->gmean, gyro, sizeof m->gmean), m->gvar = 1, m->amean = ag, m->avar = 1;
+-        m->stats_ready = 1;
++        memcpy(m->gmean, g, sizeof m->gmean), memcpy(m->avec, a, sizeof m->avec);
++        m->gvar = 0.01f, m->avar = 0.01f, m->amean = alen, m->stats_ready = 1;
+     } else if (dt > 0) {
+         const float k = dt / (HOS_MOTION_WINDOW_S + dt);
+-        float gv = 0;
++        float gv = 0, av = 0;
+         for (int i = 0; i < 3; i++) {
+-            const float d = gyro[i] - m->gmean[i];
+-            m->gmean[i] += d * k;
+-            gv += d * d;
++            const float dg = (g[i] - m->gmean[i]) * HOS_MOTION_TAU, da = a[i] - m->avec[i];
++            m->gmean[i] += (g[i] - m->gmean[i]) * k, m->avec[i] += da * k;
++            gv += dg * dg, av += da * da;
+         }
+-        m->gvar += (gv - m->gvar) * k;
+-        const float da = ag - m->amean;
+-        m->amean += da * k;
+-        m->avar += (da * da - m->avar) * k;
++        m->gvar += (gv - m->gvar) * k, m->avar += (av - m->avar) * k, m->amean += (alen - m->amean) * k;
+     }
+     const int still = m->gvar < HOS_MOTION_STILL_GYRO * HOS_MOTION_STILL_GYRO &&
+                       m->avar < HOS_MOTION_STILL_ACCEL * HOS_MOTION_STILL_ACCEL && m->amean > 0.9f && m->amean < 1.1f;
+     m->still_t = still ? m->still_t + dt : 0;
+     if (m->still_t >= HOS_MOTION_STILL_S && dt > 0) {
+-        const float k = dt / ((m->learned_t < 2 ? 0.25f : 3.0f) + dt);   /* (fast for the first 2 s still, then slowly) */
++        const float k = dt / ((m->learned_t < 2 ? 0.25f : 3.0f) + dt);
+         for (int i = 0; i < 3; i++) m->bias[i] += (m->gmean[i] - m->bias[i]) * k;
+         m->learned_t += dt;
+     }
+-    const float w[3] = {gyro[0] - m->bias[0], gyro[1] - m->bias[1], gyro[2] - m->bias[2]};
+-    /* up: the gyro's prediction (a world vector seen from a frame turning at w turns the other way), pulled toward
+-       the measured gravity while it is about 1 G */
+-    const int valid = alen > 0.65f * HOS_MOTION_G && alen < 1.35f * HOS_MOTION_G;
+-    float *up = m->up;
+-    if (!m->up_ready) {
+-        if (valid) {
+-            for (int i = 0; i < 3; i++) up[i] = accel[i] / alen;
+-            m->up_ready = 1;
+-        }
+-    } else {
+-        float p[3] = {up[0] + (-w[1] * up[2] + w[2] * up[1]) * dt, up[1] + (-w[2] * up[0] + w[0] * up[2]) * dt,
+-                      up[2] + (-w[0] * up[1] + w[1] * up[0]) * dt};
+-        float n = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+-        if (n > 0.001f) {
+-            for (int i = 0; i < 3; i++) p[i] /= n;
+-            if (valid) {
+-                const float k = dt / (0.5f + dt);   /* (a half-second pull) */
+-                for (int i = 0; i < 3; i++) p[i] += (accel[i] / alen - p[i]) * k;
+-                n = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+-                if (n > 0.001f) for (int i = 0; i < 3; i++) p[i] /= n;
++    for (int i = 0; i < 3; i++) {
++        g[i] -= m->bias[i];
++        g[i] = g[i] < -5 ? -5 : g[i] > 5 ? 5 : g[i];
++    }
++    if (hos_motion_len(g) < (m->threshold > 0 ? m->threshold : HOS_MOTION_THRESHOLD)) g[0] = g[1] = g[2] = 0;
++    else m->only_accelerometer = 0;
++    /* the turn and the tilt: the angular velocity's part about the world's up, and the rest, scaled and turned around
++       as the menu says (the up from the accelerometer, smoothed) */
++    if (alen > 0.65f && alen < 1.35f) {
++        const float k = dt / (0.1f + dt);
++        for (int i = 0; i < 3; i++) m->up[i] += (-a[i] / alen - m->up[i]) * k;
++        const float n = hos_motion_len(m->up);
++        if (n > 0.001f) for (int i = 0; i < 3; i++) m->up[i] /= n;
++    }
++    float gs[3];   /* (the scaled rates: what the game is handed; g stays real for the filter) */
++    {
++        const float sh = sens_h * (inv_h ? -1.0f : 1.0f), sv = sens_v * (inv_v ? -1.0f : 1.0f);
++        const float t = g[0] * m->up[0] + g[1] * m->up[1] + g[2] * m->up[2];
++        for (int i = 0; i < 3; i++) gs[i] = sh * t * m->up[i] + sv * (g[i] - t * m->up[i]);
++    }
++    if (dt > HOS_MOTION_DT_MAX) dt = 0;   /* (Eden ignores a stall: no rotation, no orientation step) */
++    for (int i = 0; i < 3; i++) m->out.rotation[i] += gs[i] * dt;
++    /* Eden's ResetOrientation: a filter that lost track (its error over 0.1) is set again from the accelerometer once
++       the pad has lain face up and still for 900 readings */
++    if (hos_motion_len(m->real_error) >= 0.1f && !m->only_accelerometer) {
++        if (hos_motion_len(g) < 0.05f && alen > 0.9f && alen < 1.1f && a[2] <= -0.9f) {
++            if (++m->reset_counter > 900) {
++                m->quat[0] = m->quat[1] = m->quat[3] = 0, m->quat[2] = -1;
++                memset(m->integral_error, 0, sizeof m->integral_error);
++                float c[3];
++                for (int it = 0; it < 100 && hos_motion_len(m->real_error) >= 0.01f; it++)
++                    hos_motion_mahony(m, a, g, 0.015f, 10, c);
++                memcpy(m->quat_out, m->quat, sizeof m->quat);   /* (set again from gravity: the handed-out one too) */
++                m->reset_counter = 0;
+             }
+-            memcpy(up, p, sizeof p);
++        } else {
++            m->reset_counter = 0;
+         }
+     }
+-    /* right: the pad's own x, level (gravity taken out); when the pad points x up, its z instead */
+-    float right[3] = {1 - up[0] * up[0], -up[0] * up[1], -up[0] * up[2]};
+-    float rl = sqrtf(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+-    if (rl < 0.1f) {
+-        right[0] = -up[0] * up[2], right[1] = -up[1] * up[2], right[2] = 1 - up[2] * up[2];
+-        rl = sqrtf(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+-    }
+-    for (int i = 0; i < 3; i++) right[i] /= rl;
+-    const float fwd[3] = {right[1] * up[2] - right[2] * up[1], right[2] * up[0] - right[0] * up[2],
+-                          right[0] * up[1] - right[1] * up[0]};
+-    m->rates[0] = w[0] * right[0] + w[1] * right[1] + w[2] * right[2];
+-    m->rates[1] = w[0] * up[0] + w[1] * up[1] + w[2] * up[2];
+-    m->rates[2] = w[0] * fwd[0] + w[1] * fwd[1] + w[2] * fwd[2];
+-    const float sh = sens_h * (inv_h ? -1.0f : 1.0f), sv = -sens_v * (inv_v ? -1.0f : 1.0f);
+-    m->pitch = hos_motion_wrap(m->pitch + m->rates[0] * sv * dt);
+-    /* the vertical aim's drift: pulled gently toward the tilt gravity measures (the pad's tilt about its x axis since
+-       the filter started, scaled the same way), so leftover bias or timing error cannot add up. Only while the pad's
+-       x is about level (rolled under about 15 degrees): rolled, the tilt about the pad's own x moves faster than the
+-       pitch about the levelled x (by 1 / sqrt(1 - up[0]^2)), and the pull would drag the aim past each move
+-       (hckrman101); what builds up while rolled is corrected once it is level again. Not while shaken either. */
+-    if (m->up_ready && valid && fabsf(up[0]) < HOS_MOTION_TILT_ROLL) {
+-        const float tilt = atan2f(-up[2], up[1]);   /* (it grows at the x rate: d/dt = w[0]) */
+-        /* (anchored so the aim stays where it is: the first time the pad is level may be after it moved while rolled,
+-           or held tilted when the filter started; sv is never 0, the menu's least sensitivity is 10%) */
+-        if (!m->tilt_ready) m->tilt0 = hos_motion_wrap(tilt - m->pitch / sv), m->tilt_ready = 1;
+-        const float target = hos_motion_wrap(hos_motion_wrap(tilt - m->tilt0) * sv);
+-        m->pitch = hos_motion_wrap(m->pitch + hos_motion_wrap(target - m->pitch) * (dt / (HOS_MOTION_TILT_S + dt)));
++    if (dt > 0) {
++        /* the real filter, then the handed-out orientation: the scaled rates plus the real filter's correction, so it
++           loses the gyro's drift but keeps a scaled or inverted move (the gravity pull acts on the real one only;
++           hckrman101). While only the accelerometer has been seen the two settle together. */
++        const int settling = m->only_accelerometer;
++        float c[3], rs[3];
++        hos_motion_mahony(m, a, g, dt, 1, c);
++        if (settling) {
++            memcpy(m->quat_out, m->quat, sizeof m->quat);
++        } else {
++            /* the scaling in the world's frame (hckrman101): the real rate taken to the world by the real orientation,
++               its vertical part (the turn) scaled by sh and the rest (the tilt) by sv, and brought back to the pad by the
++               handed-out one, so a scaled turn while tilted turns quat_out about its own vertical and does not tip it.
++               Both matrices map the world to the pad (their third column is the world's up seen from the pad). */
++            float dr[9], dq[9], w[3], go[3];
++            hos_motion_direction(m->quat, dr);
++            hos_motion_direction(m->quat_out, dq);
++            {
++                const float sh = sens_h * (inv_h ? -1.0f : 1.0f), sv = sens_v * (inv_v ? -1.0f : 1.0f);
++                for (int i = 0; i < 3; i++) w[i] = dr[i] * g[0] + dr[3 + i] * g[1] + dr[6 + i] * g[2];   /* (dr^T g) */
++                w[0] *= sv, w[1] *= sv, w[2] *= sh;
++                for (int i = 0; i < 3; i++) go[i] = dq[3 * i] * w[0] + dq[3 * i + 1] * w[1] + dq[3 * i + 2] * w[2];
++            }
++            hos_motion_rate(m, go, rs);
++            for (int i = 0; i < 3; i++) rs[i] += c[i];
++            hos_motion_integrate(m->quat_out, rs, dt);
++        }
+     }
+-    hos_motion_rest(&m->out, m->pitch);
+-    m->out.gyro[1] = m->rates[1] * sh / HOS_MOTION_TAU;
++    memcpy(m->out.accel, a, sizeof a);
++    memcpy(m->out.gyro, gs, sizeof gs);
++    hos_motion_direction(m->quat_out, m->out.direction);
+     return 1;
+ }
+diff --git a/host/hos_sdl.c b/host/hos_sdl.c
+index 90897ae..7dac537 100644
+--- a/host/hos_sdl.c
++++ b/host/hos_sdl.c
+@@ -20,6 +20,7 @@ static struct {
+     void *OpenAudioDevice, *PauseAudioDevice, *OpenAudioDeviceStream, *ResumeAudioStreamDevice, *PutAudioStreamData;
+     /* controllers */
+     void *PadOpen, *PadClose, *PadConnected, *PadsUpdate, *PadButton, *PadAxis, *PadName, *PadRumble;
++    void *PadType, *PadEffect;   /* (optional: Switch HD rumble, host/pad_sdl.c) */
+     void *PadHasSensor, *PadSensorEnable, *PadSensorData;   /* (motion: optional, NULL in an SDL without them) */
+     void *GetGamepads, *GetGamepadID, *Free;   /* (SDL3) */
+     void *NumJoysticks, *IsGameController, *DeviceInstanceID, *GetJoystick, *JoystickInstanceID;   /* (SDL2) */
+@@ -59,6 +60,9 @@ static int get_all(HMODULE m, int three) {
+     GET2(PadAxis, "SDL_GetGamepadAxis", "SDL_GameControllerGetAxis");
+     GET2(PadName, "SDL_GetGamepadName", "SDL_GameControllerName");
+     GET2(PadRumble, "SDL_RumbleGamepad", "SDL_GameControllerRumble");
++    /* (SDL2 2.0.12 and 2.0.16 on, SDL3 3.2 on: without them every pad keeps the motor rumble) */
++    *(FARPROC *)&f.PadType = GetProcAddress(m, three ? "SDL_GetGamepadType" : "SDL_GameControllerGetType");
++    *(FARPROC *)&f.PadEffect = GetProcAddress(m, three ? "SDL_SendGamepadEffect" : "SDL_GameControllerSendEffect");
+     /* (motion sensors: SDL 2.0.14 on and every SDL3; without them the pads still play, with no gyro) */
+     *(FARPROC *)&f.PadHasSensor = GetProcAddress(m, three ? "SDL_GamepadHasSensor" : "SDL_GameControllerHasSensor");
+     *(FARPROC *)&f.PadSensorEnable = GetProcAddress(m, three ? "SDL_SetGamepadSensorEnabled" : "SDL_GameControllerSetSensorEnabled");
+@@ -579,6 +583,13 @@ void hos_sdl_pad_rumble(void *pad, uint16_t low, uint16_t high, uint32_t ms) {
+     if (version == 3) CALL(_Bool (*)(void *, uint16_t, uint16_t, uint32_t), PadRumble)(pad, low, high, ms);
+     else CALL(int (*)(void *, uint16_t, uint16_t, uint32_t), PadRumble)(pad, low, high, ms);
+ }
++int hos_sdl_pad_type(void *pad) { return f.PadType ? CALL(int (*)(void *), PadType)(pad) : 0; }
++int hos_sdl_pad_has_effect(void) { return f.PadEffect != NULL; }
++int hos_sdl_pad_effect(void *pad, const void *data, int size) {
++    if (!f.PadEffect) return 0;
++    if (version == 3) return CALL(_Bool (*)(void *, const void *, int), PadEffect)(pad, data, size);
++    return CALL(int (*)(void *, const void *, int), PadEffect)(pad, data, size) == 0;
++}
+ /* (motion) type: HOS_SDL_SENSOR_ACCEL or _GYRO, the same numbers in both */
+ int hos_sdl_pad_has_sensor(void *pad, int type) {
+     if (!f.PadHasSensor || !f.PadSensorEnable || !f.PadSensorData) return 0;
+diff --git a/host/hos_sdl.h b/host/hos_sdl.h
+index e64379c..c748f21 100644
+--- a/host/hos_sdl.h
++++ b/host/hos_sdl.h
+@@ -73,6 +73,9 @@ int16_t hos_sdl_pad_axis(void *pad, int axis);
+ const char *hos_sdl_pad_name(void *pad);
+ int32_t hos_sdl_pad_id(void *pad);
+ void hos_sdl_pad_rumble(void *pad, uint16_t low, uint16_t high, uint32_t ms);
++int hos_sdl_pad_type(void *pad);
++int hos_sdl_pad_has_effect(void);
++int hos_sdl_pad_effect(void *pad, const void *data, int size);
+ /* motion sensors (SDL_SENSOR_ACCEL m/s^2, SDL_SENSOR_GYRO rad/s, three values each): 0 when the pad or the SDL has none */
+ enum { HOS_SDL_SENSOR_ACCEL = 1, HOS_SDL_SENSOR_GYRO = 2 };
+ int hos_sdl_pad_has_sensor(void *pad, int type);
+diff --git a/host/hos_update.c b/host/hos_update.c
+index 3eb970d..f9c5c8e 100644
+--- a/host/hos_update.c
++++ b/host/hos_update.c
+@@ -13,8 +13,8 @@
+ #include <string.h>
+ 
+ #define UPDATE_HOST L"api.github.com"
+-#define UPDATE_PATH L"/repos/pixl27/ProjectReLink/releases/latest"
+-#define RELEASES_PAGE L"https://github.com/pixl27/ProjectReLink/releases/latest"
++#define UPDATE_PATH L"/repos/ffffffuck/ProjectReLink-GyroRumble/releases/latest"
++#define RELEASES_PAGE L"https://github.com/ffffffuck/ProjectReLink-GyroRumble/releases/latest"
+ 
+ /* (a line "name=value" of a small text file, in UTF-8: its value, trimmed) */
+ static int read_value(const wchar_t *path, const char *name, char *out, size_t cap) {
+@@ -217,10 +217,10 @@ static int pipe_tag(const char *cmd, char *tag, size_t cap) {
+ static int latest_tag(char *tag, size_t cap) {
+     if (pipe_tag("curl -fsSL --max-time 4 --retry 2 -A ReLink-update-check "
+                  "-H \"Accept: application/vnd.github+json\" "
+-                 "https://api.github.com/repos/pixl27/ProjectReLink/releases/latest 2>/dev/null", tag, cap))
++                 "https://api.github.com/repos/ffffffuck/ProjectReLink-GyroRumble/releases/latest 2>/dev/null", tag, cap))
+         return 1;
+     return pipe_tag("curl -fsSL --max-time 8 --retry 2 -A ReLink-update-check "
+-                    "https://github.com/pixl27/ProjectReLink/releases/latest/download/relink-linux.txt 2>/dev/null", tag, cap);
++                    "https://github.com/ffffffuck/ProjectReLink-GyroRumble/releases/latest/download/relink-linux.txt 2>/dev/null", tag, cap);
+ }
+ 
+ /* the builder an update installed (builder/linux/linux_update.py): <data>/relink/builder/versions/<current>/AppRun. The
+@@ -292,7 +292,7 @@ void hos_update_check(void) {
+     if (strncmp(answer, "Update", 6)) return;
+     if (!has_builder) {
+         if (fork() == 0) {
+-            execlp("xdg-open", "xdg-open", "https://github.com/pixl27/ProjectReLink/releases/latest", (char *)0);
++            execlp("xdg-open", "xdg-open", "https://github.com/ffffffuck/ProjectReLink-GyroRumble/releases/latest", (char *)0);
+             _exit(127);
+         }
+         return;
+diff --git a/host/nn_hid.c b/host/nn_hid.c
+index 4edc8f7..f5fb2fa 100644
+--- a/host/nn_hid.c
++++ b/host/nn_hid.c
+@@ -937,7 +937,7 @@ HLE(_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_2
+ }
+ 
+ /* Handles: six-axis ones are opaque u32s; a vibration handle is {u8 style type (3 = full key), u8 npad id, u8 device
+-   index (0 left, 1 right), u8 reserved}, which the SDK's vibration classes read. Vibration goes nowhere yet. */
++   index (0 left, 1 right), u8 reserved}, which the SDK vibration classes read. */
+ HLE(_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE) {
+     /* (relink) OoT asks for two (a Joy-Con pair) but runs its motion path only when three come back: at two its
+        third source (the console's own, through JCMS) stays dead, and that branch is what marks motion active for the
+@@ -952,7 +952,7 @@ HLE(_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util1
+ /* SixAxisSensorState, 0x60 bytes: {i64 delta time (ns), i64 sampling number, f32 acceleration[3] (G), angular velocity[3]
+    (revolutions a second), angle[3] (revolutions), direction[3][3], u32 attributes (1 connected), pad}. Newest first.
+    (relink) With Motion controls on and a pad with a gyroscope (host/pad_sdl.c), the state OoT aims with
+-   (host/hos_motion.h: the yaw rate and a tilt matrix, the rest neutral); else a pad lying still. */
++   (host/hos_motion.h: full Switch-frame state from the Longshot filter); else a pad lying still. */
+ HLE(_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE) {
+     /* (the sampling number goes up once per reading, as the hardware's does: while live it is the readings' own count,
+        moved on past the last number handed out; each entry is its own reading, with the time since the one before) */
+@@ -1056,7 +1056,9 @@ static void vibration_send(uint64_t handle, uint64_t value) {
+             hos_log("hid: vibration #%lld: handle %08x, low %.2f @ %.0f Hz, high %.2f @ %.0f Hz", n, G32(handle), v[0], v[1], v[2], v[3]);
+         if ((++n & 4095) == 0) hos_log("hid: %lld vibration values, strongest %.2f since the last count", n, peak), peak = 0;
+     }
+-    void hos_sdl_rumble(float low, float high);   /* pad_sdl.c */
++    void hos_sdl_rumble_hd(int side, const float value[4]);   /* pad_sdl.c: original values for Switch HD rumble */
++    hos_sdl_rumble_hd(dev, v);
++    void hos_sdl_rumble(float low, float high);   /* pad_sdl.c: motor fallback */
+     hos_sdl_rumble(amp[0][0] > amp[1][0] ? amp[0][0] : amp[1][0], amp[0][1] > amp[1][1] ? amp[0][1] : amp[1][1]);
+ }
+ static void vibration_value_idle(uint64_t v) {   /* VibrationValue {f32 amp_low, freq_low, amp_high, freq_high} */
+diff --git a/host/pad_sdl.c b/host/pad_sdl.c
+index 895bd5e..b22eef7 100644
+--- a/host/pad_sdl.c
++++ b/host/pad_sdl.c
+@@ -20,6 +20,7 @@
+ #define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
+ #include "hos_sdl.h"
++#include "hd_rumble.h"
+ #include "hos_motion.h"
+ #include "../gpu/vk/vk_api.h"   /* (HOS_PAD_*) */
+ 
+@@ -39,6 +40,9 @@ static struct {
+     int32_t id;
+     uint16_t rumble_lo, rumble_hi;
+     int64_t rumble_ns;
++    uint8_t hd, hd_kind, hd_ever;
++    uint8_t hd_sent[HD_RUMBLE_PACKET_SIZE];
++    int64_t hd_ns;
+     int motion, motion_on;
+     int64_t motion_retry_ns, used_ns;
+     uint64_t input_sig;
+@@ -52,6 +56,8 @@ static uint64_t state_buttons;
+ static int32_t state_stick[4];
+ static int state_count;
+ static volatile LONG rumble_low, rumble_high;   /* 0..65535, set by the vibration HLE */
++static SRWLOCK hd_lock = SRWLOCK_INIT;
++static float hd_values[2][4] = {{0.0f, 160.0f, 0.0f, 320.0f}, {0.0f, 160.0f, 0.0f, 320.0f}};
+ /* (motion) the pad read and its filter (the polling thread's own), then what the game is handed (under state_lock): the
+    last HOS_MOTION_HISTORY readings, newest at motion_hist[motion_head]; gyro_status for the menu */
+ static HosMotion motion;
+@@ -118,6 +124,43 @@ static void rumble_strength(unsigned heavy, unsigned light, int percent, uint16_
+     out[1] = (uint16_t)l;
+ }
+ 
++/* Switch Pro and Joy-Con controllers can receive the game's original HD rumble packet through SDL's effect API. */
++static void hd_open(int i, void *gc) {
++    static int env_off = -1;
++    if (env_off < 0) {
++        const char *e = getenv("HOS_HD_RUMBLE");
++        env_off = e && !strcmp(e, "0");
++    }
++    pads[i].hd_kind = (uint8_t)hd_rumble_kind(hos_sdl_load(), hos_sdl_pad_type(gc));
++    pads[i].hd = (uint8_t)hd_rumble_start(pads[i].hd_kind, hos_sdl_pad_has_effect(), env_off);
++    pads[i].hd_ever = 0;
++    pads[i].hd_ns = 0;
++    const uint8_t n[4] = {0x00, 0x01, 0x40, 0x40};
++    hd_rumble_packet(HD_RUMBLE_PRO, n, n, pads[i].hd_sent);
++}
++
++static int hd_poll(int i, const uint8_t side[3][4], long long now) {
++    if (pads[i].hd == HD_RUMBLE_OFF) return 0;
++    uint8_t packet[HD_RUMBLE_PACKET_SIZE];
++    const int single = pads[i].hd_kind == HD_RUMBLE_JOYCON_LEFT || pads[i].hd_kind == HD_RUMBLE_JOYCON_RIGHT;
++    hd_rumble_packet(pads[i].hd_kind, single ? side[2] : side[0], single ? side[2] : side[1], packet);
++    if (!hd_rumble_due(packet, pads[i].hd_sent, pads[i].hd_ever, now, pads[i].hd_ns)) return 1;
++    const int was = pads[i].hd;
++    pads[i].hd = (uint8_t)hd_rumble_after_send(hos_sdl_pad_effect(pads[i].gc, packet, sizeof packet));
++    if (pads[i].hd == HD_RUMBLE_OFF) {
++        hos_log("hid: \"%s\" did not take HD rumble (%s): its rumble goes to its motors",
++                hos_sdl_pad_name(pads[i].gc), hos_sdl_error());
++        pads[i].rumble_lo = pads[i].rumble_hi = 0;
++        pads[i].rumble_ns = 0;
++        return 0;
++    }
++    if (was == HD_RUMBLE_UNKNOWN) hos_log("hid: HD rumble on \"%s\"", hos_sdl_pad_name(pads[i].gc));
++    memcpy(pads[i].hd_sent, packet, sizeof packet);
++    pads[i].hd_ns = now;
++    pads[i].hd_ever = 1;
++    return 1;
++}
++
+ /* (motion) the sensors on while Motion controls is on (HOS_OPT_GYRO, on without the menu), off otherwise; the pad with
+    them that was used last read into the filter. count: the pads open */
+ static void motion_poll(int64_t now, int count) {
+@@ -177,22 +220,28 @@ static void motion_poll(int64_t now, int count) {
+     /* the filter runs outside the lock (the game's input calls take it); a repeat of the last reading is no reading */
+     const int64_t dt_ns = now - motion_ns;
+     motion_ns = now;
++    {
++        static const float zone[3] = {HOS_MOTION_THRESHOLD_TIGHT, HOS_MOTION_THRESHOLD, HOS_MOTION_THRESHOLD_LOOSE};
++        const int z = rx_option(HOS_OPT_GYRO_DEADZONE, 1);
++        motion.threshold = zone[z < 0 ? 0 : z > 2 ? 2 : z];
++    }
+     if (!hos_motion_update(&motion, a, g, (float)(dt_ns / 1e9), rx_option(HOS_OPT_GYRO_SENS_X, 100) / 100.0f,
+                            rx_option(HOS_OPT_GYRO_SENS_Y, 100) / 100.0f, rx_option(HOS_OPT_GYRO_INV_X, 0),
+                            rx_option(HOS_OPT_GYRO_INV_Y, 0)) && !fresh)
+         return;
+-    if (debug && now >= motion_log_ns) {   /* (twice a second: what the game gets) */
++    if (debug && now >= motion_log_ns) {   /* (twice a second: Switch-frame state handed to the game) */
+         motion_log_ns = now + 500000000LL;
+-        /* (relink, issue 8) and the raw readings, the gyro's spread and how long the pad has been still: a Switch Pro pad
+-           whose bias was never learned, and whose left/right went the wrong way, could not be told apart from the line alone */
+-        hos_log("hid: motion: up (%+.2f, %+.2f, %+.2f), pitch/yaw/roll %+.2f %+.2f %+.2f rad/s, aim tilt %+.3f, yaw "
+-                "%+.3f turns/s, bias (%+.4f, %+.4f, %+.4f); raw gyro (%+.3f, %+.3f, %+.3f) rad/s, accel (%+.2f, %+.2f, %+.2f) "
+-                "m/s2, gyro spread %.4f rad/s (still under %.2f), accel %.3f G spread %.4f, still %.1f s",
+-                motion.up[0], motion.up[1], motion.up[2], motion.rates[0], motion.rates[1], motion.rates[2], motion.pitch,
+-                motion.out.gyro[1], motion.bias[0], motion.bias[1], motion.bias[2], g[0], g[1], g[2], a[0], a[1], a[2],
+-                sqrtf(motion.gvar), HOS_MOTION_STILL_GYRO, motion.amean, sqrtf(motion.avar), motion.still_t);
+-    }
+-    HosMotionSample r;
++        hos_log("hid: motion: SDL gyro (%+.2f, %+.2f, %+.2f) rad/s, accel (%+.2f, %+.2f, %+.2f) m/s2; Switch gyro "
++                "(%+.3f, %+.3f, %+.3f) turns/s, accel (%+.2f, %+.2f, %+.2f) G, up (%+.2f, %+.2f, %+.2f), "
++                "rotation (%+.3f, %+.3f, %+.3f) turns; dir [%+.2f %+.2f %+.2f; %+.2f %+.2f %+.2f; "
++                "%+.2f %+.2f %+.2f], bias (%+.4f, %+.4f, %+.4f) turns/s, still %.1f s",
++                g[0], g[1], g[2], a[0], a[1], a[2], motion.out.gyro[0], motion.out.gyro[1], motion.out.gyro[2],
++                motion.out.accel[0], motion.out.accel[1], motion.out.accel[2], motion.up[0], motion.up[1], motion.up[2],
++                motion.out.rotation[0], motion.out.rotation[1], motion.out.rotation[2], motion.out.direction[0],
++                motion.out.direction[1], motion.out.direction[2], motion.out.direction[3], motion.out.direction[4],
++                motion.out.direction[5], motion.out.direction[6], motion.out.direction[7], motion.out.direction[8],
++                motion.bias[0], motion.bias[1], motion.bias[2], motion.still_t);
++    }    HosMotionSample r;
+     r.st = motion.out;
+     r.n = ++motion_readings;
+     r.dt_ns = fresh ? 5000000 : now - motion_reading_ns;   /* (the time since the reading before) */
+@@ -245,6 +294,7 @@ static void pads_poll(void) {
+                 pads[slot].used_ns = now, pads[slot].input_sig = 0;   /* (just connected: the one about to be used) */
+                 pads[slot].serial = ++pads_opened;
+                 pads[slot].has_bias = 0;
++                hd_open(slot, gc);
+                 hos_log("hid: controller \"%s\" connected (SDL)%s", hos_sdl_pad_name(gc),
+                         pads[slot].motion ? ", with a gyroscope" : "");
+             }
+@@ -257,6 +307,19 @@ static void pads_poll(void) {
+         uint16_t motors[2];
+         rumble_strength((uint16_t)rumble_low, (uint16_t)rumble_high, strength, motors);
+         const uint16_t lo = motors[0], hi = motors[1];
++        uint8_t side[3][4];
++        {
++            float hv[2][4], felt[3][4];
++            AcquireSRWLockShared(&hd_lock);
++            memcpy(hv, hd_values, sizeof hv);
++            ReleaseSRWLockShared(&hd_lock);
++            hd_rumble_felt(hv[0], felt[0]);
++            hd_rumble_felt(hv[1], felt[1]);
++            hd_rumble_encode(felt[0], strength, side[0]);
++            hd_rumble_encode(felt[1], strength, side[1]);
++            hd_rumble_merge(felt[0], felt[1], felt[2]);
++            hd_rumble_encode(felt[2], strength, side[2]);
++        }
+         for (int i = 0; i < MAX_PADS; i++) {
+             void *gc = pads[i].gc;
+             if (!gc) continue;
+@@ -278,7 +341,9 @@ static void pads_poll(void) {
+                 for (int k = 0; k < 4; k++) sig |= (uint64_t)(v[k] > 0 ? 1 : v[k] < 0 ? 2 : 0) << (32 + 2 * k);
+                 if (sig != pads[i].input_sig) pads[i].input_sig = sig, pads[i].used_ns = now;
+             }
+-            if (rumble_due(lo, hi, pads[i].rumble_lo, pads[i].rumble_hi, now, pads[i].rumble_ns)) {
++            if (hd_poll(i, (const uint8_t (*)[4])side, now)) {
++                pads[i].rumble_lo = lo, pads[i].rumble_hi = hi, pads[i].rumble_ns = now;
++            } else if (rumble_due(lo, hi, pads[i].rumble_lo, pads[i].rumble_hi, now, pads[i].rumble_ns)) {
+                 hos_sdl_pad_rumble(gc, lo, hi, lo || hi ? 1000 : 0);
+                 pads[i].rumble_lo = lo;
+                 pads[i].rumble_hi = hi;
+@@ -365,3 +430,9 @@ void hos_sdl_rumble(float low, float high) {
+     InterlockedExchange(&rumble_low, (LONG)(low * 65535));
+     InterlockedExchange(&rumble_high, (LONG)(high * 65535));
+ }
++
++void hos_sdl_rumble_hd(int side, const float value[4]) {
++    AcquireSRWLockExclusive(&hd_lock);
++    memcpy(hd_values[side & 1], value, sizeof hd_values[0]);
++    ReleaseSRWLockExclusive(&hd_lock);
++}
+diff --git a/launcher/ReLink.csproj b/launcher/ReLink.csproj
+index 639c7fd..a377da8 100644
+--- a/launcher/ReLink.csproj
++++ b/launcher/ReLink.csproj
+@@ -11,7 +11,7 @@
+     <ApplicationIcon>app.ico</ApplicationIcon>
+     <ApplicationManifest>app.manifest</ApplicationManifest>
+     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+-    <Version>0.7.7</Version>
++    <Version>0.7.8</Version>
+     <Product>Project ReLink</Product>
+     <Description>Project ReLink: installs, updates and starts the game</Description>
+   </PropertyGroup>
+diff --git a/launcher/Texts.cs b/launcher/Texts.cs
+index c437d90..e4b89e5 100644
+--- a/launcher/Texts.cs
++++ b/launcher/Texts.cs
+@@ -24,7 +24,7 @@ static class Texts
+     public static string L(string fr, string en) => French ? fr : en;
+ 
+     public const string Name = "Project ReLink";
+-    public const string Repo = "pixl27/ProjectReLink";
++    public const string Repo = "ffffffuck/ProjectReLink-GyroRumble";
+     public const string RepoPage = "https://github.com/" + Repo;
+     public const string ReleasesPage = RepoPage + "/releases/latest";
+     public const string HelpPage = RepoPage + "#readme";
+diff --git a/launcher/setup/setup.c b/launcher/setup/setup.c
+index d08c6fa..ce4f848 100644
+--- a/launcher/setup/setup.c
++++ b/launcher/setup/setup.c
+@@ -432,8 +432,8 @@ static const char *manifest_url(void) {
+     char tag[128];
+     wanted_tag(tag, sizeof tag);
+     if (e && *e) snprintf(u, sizeof u, "%s", e);
+-    else if (tag[0]) snprintf(u, sizeof u, "https://github.com/pixl27/ProjectReLink/releases/download/%s/relink-setup.txt", tag);
+-    else snprintf(u, sizeof u, "%s", "https://github.com/pixl27/ProjectReLink/releases/latest/download/relink-setup.txt");
++    else if (tag[0]) snprintf(u, sizeof u, "https://github.com/ffffffuck/ProjectReLink-GyroRumble/releases/download/%s/relink-setup.txt", tag);
++    else snprintf(u, sizeof u, "%s", "https://github.com/ffffffuck/ProjectReLink-GyroRumble/releases/latest/download/relink-setup.txt");
+     return u;
+ }
+ 
+@@ -490,7 +490,7 @@ static DWORD WINAPI work(LPVOID unused) {
+     if (!ok)
+         fail(g_http_status == 404
+                  ? L"ReLink has no release to install from yet. Its releases page says when one is out: "
+-                   L"https://github.com/pixl27/ProjectReLink/releases"
++                   L"https://github.com/ffffffuck/ProjectReLink-GyroRumble/releases"
+              : g_http_status ? L"GitHub's download servers are failing right now (an error 500 or above, tried 8 times over 3 minutes). "
+                                L"This is on GitHub's side: try again in a few minutes, or later today."
+                              : L"Could not reach GitHub to get ReLink. Check your internet connection and try again.");
+diff --git a/recomplauncher.json b/recomplauncher.json
+index d7e2ff4..082713e 100644
+--- a/recomplauncher.json
++++ b/recomplauncher.json
+@@ -2,7 +2,7 @@
+   "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+   "format": 1,
+   "name": "Project ReLink",
+-  "repo": "pixl27/ProjectReLink",
++  "repo": "ffffffuck/ProjectReLink-GyroRumble",
+   "game": {
+     "kind": "iso_or_folder",
+     "label": "Your copy of The Legend of Zelda: Ocarina of Time for Nintendo Switch 2, with its update installed (program 0400486024DEC000, update v131072, build e0f3ccfa): its .nup file, or a folder holding its exefs and romfs folders. Other versions do not work.",
+diff --git a/scripts/make_seed.py b/scripts/make_seed.py
+index 7d1a31b..34f9c58 100644
+--- a/scripts/make_seed.py
++++ b/scripts/make_seed.py
+@@ -73,7 +73,7 @@ def main():
+     p.add_argument("--python", required=True)
+     p.add_argument("--cpm", required=True)
+     p.add_argument("--work", required=True)
+-    p.add_argument("--base", default="https://github.com/pixl27/ProjectReLink/releases/download/builder-parts")
++    p.add_argument("--base", default="https://github.com/ffffffuck/ProjectReLink-GyroRumble/releases/download/builder-parts")
+     a = p.parse_args()
+     if not os.path.isfile(os.path.join(a.python, "python.exe")):
+         sys.exit("%s: no python.exe" % a.python)
+diff --git a/scripts/make_setup_parts.py b/scripts/make_setup_parts.py
+index 3718640..6eb557a 100644
+--- a/scripts/make_setup_parts.py
++++ b/scripts/make_setup_parts.py
+@@ -73,7 +73,7 @@ def main():
+         sys.exit("not a ReLink package folder: %s" % root)
+     # (the parts live in one release of their own, named by their checksum: a part that did not change is not uploaded again, and a
+     # release itself holds only ReLink.exe (the setup) and the list it reads)
+-    base = (a.base or "https://github.com/pixl27/ProjectReLink/releases/download/builder-parts").rstrip("/")
++    base = (a.base or "https://github.com/ffffffuck/ProjectReLink-GyroRumble/releases/download/builder-parts").rstrip("/")
+     os.makedirs(a.out, exist_ok=True)
+     with open(os.path.join(root, "tools", "version.txt"), "w", newline="\n") as f:
+         f.write(a.tag + "\n")
