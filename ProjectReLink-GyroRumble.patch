@@ -971,8 +971,9 @@ index 639c7fd..a377da8 100644
      <ApplicationManifest>app.manifest</ApplicationManifest>
      <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
 -    <Version>0.7.7</Version>
-+    <Version>0.7.8</Version>
-     <Product>Project ReLink</Product>
++    <Version>0.7.7</Version>
+-    <Product>Project ReLink</Product>
++    <Product>Project ReLink GyroRumble Fix</Product>
      <Description>Project ReLink: installs, updates and starts the game</Description>
    </PropertyGroup>
 diff --git a/launcher/Texts.cs b/launcher/Texts.cs
@@ -982,7 +983,8 @@ index c437d90..e4b89e5 100644
 @@ -24,7 +24,7 @@ static class Texts
      public static string L(string fr, string en) => French ? fr : en;
  
-     public const string Name = "Project ReLink";
+-    public const string Name = "Project ReLink";
++    public const string Name = "Project ReLink GyroRumble Fix";
 -    public const string Repo = "pixl27/ProjectReLink";
 +    public const string Repo = "ffffffuck/ProjectReLink-GyroRumble";
      public const string RepoPage = "https://github.com/" + Repo;
@@ -1019,7 +1021,8 @@ index d7e2ff4..082713e 100644
 @@ -2,7 +2,7 @@
    "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
    "format": 1,
-   "name": "Project ReLink",
+-  "name": "Project ReLink",
++  "name": "Project ReLink GyroRumble Fix",
 -  "repo": "pixl27/ProjectReLink",
 +  "repo": "ffffffuck/ProjectReLink-GyroRumble",
    "game": {
