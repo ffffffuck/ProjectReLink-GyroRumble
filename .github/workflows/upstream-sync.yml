@@ -15,6 +15,7 @@ jobs:
   sync:
     if: github.repository == 'ffffffuck/ProjectReLink-GyroRumble'
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     permissions:
       contents: write
       pull-requests: write
@@ -37,7 +38,7 @@ jobs:
             echo "Upstream is already included in main." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "Upstream has new commits to review." >> "$GITHUB_STEP_SUMMARY"
+            echo "Upstream has new commits to sync." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Prepare sync branch and check custom patch
@@ -69,10 +70,38 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           title="Sync ProjectReLink upstream"
-          body="The upstream main branch has new commits. The gyro-rumble patch check passed. The Windows workflow will build and validate this branch; review and merge this pull request to update the fork's main branch."
+          body="The upstream main branch has new commits. The gyro-rumble patch check passed. This PR is merged automatically only after the Windows package and Vulkan build checks pass. A GyroRumble Fix release is published after the merge."
           number=$(gh pr list --base main --head automation/upstream-sync --state open --json number --jq '.[0].number // ""')
           if [[ -n "$number" ]]; then
             gh pr edit "$number" --title "$title" --body "$body"
           else
             gh pr create --base main --head automation/upstream-sync --title "$title" --body "$body"
+            number=$(gh pr list --base main --head automation/upstream-sync --state open --json number --jq '.[0].number // ""')
           fi
+
+          if [[ -z "$number" ]]; then
+            echo "::error::Could not find the upstream sync pull request after creating it."
+            exit 1
+          fi
+
+          echo "Waiting for the Windows package and Vulkan checks on PR #$number." >> "$GITHUB_STEP_SUMMARY"
+          gh pr checks "$number" --watch --fail-fast
+
+          state=$(gh pr view "$number" --json state --jq '.state')
+          if [[ "$state" == OPEN ]]; then
+            gh pr merge "$number" --merge
+          elif [[ "$state" != MERGED ]]; then
+            echo "::error::Sync PR #$number is in unexpected state: $state."
+            exit 1
+          fi
+
+          merge_sha=$(gh pr view "$number" --json mergeCommit --jq '.mergeCommit.oid')
+          if [[ -z "$merge_sha" || "$merge_sha" == null ]]; then
+            echo "::error::Could not find the merge commit for sync PR #$number."
+            exit 1
+          fi
+
+          gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" \
+            -f event_type=publish-upstream-sync \
+            -F "client_payload[merge_sha]=$merge_sha"
+          echo "PR #$number merged at $merge_sha; dispatched the release build." >> "$GITHUB_STEP_SUMMARY"

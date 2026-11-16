@@ -8,10 +8,11 @@ release of their own, `builder-parts`. No game data is involved at any step.
 
 1. Set the version in `launcher/ReLink.csproj` (`<Version>`), commit, and push to `main`. The workflow runs on every push and
    leaves its files as an artifact (`ReLink-windows`): a failed run here is found before the tag.
-2. For an upstream sync, the sync workflow opens a PR for review. When that PR is merged, the Windows workflow builds both
-   packages, tags the merge `vX.Y.Z-gyro-rumble-fix`, and publishes the installer, setup list and RecompLauncher zip. The
-   upstream version stays in the numeric part of the tag; the suffix distinguishes this fork. Ordinary pushes to `main`
-   still only build artifacts.
+2. For an upstream sync, the sync workflow opens a PR and waits for the Windows package and Vulkan checks. If they pass, it
+   merges the PR and dispatches the Windows release build. The merge is tagged `vX.Y.Z-gyro-rumble-fix.N` and published with
+   the installer, setup list and RecompLauncher zip. Failed checks leave the PR open and do not publish. The upstream
+   version stays in the numeric part of the tag; the suffix distinguishes this fork. Ordinary pushes to `main` still only
+   build artifacts.
 3. For other releases, tag the commit `vX.Y.Z` and push the tag. The workflow uploads the new parts to `builder-parts` and
    creates the release. A tag with `-rc` is a prerelease and never "latest".
 
