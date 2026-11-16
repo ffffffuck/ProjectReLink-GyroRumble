@@ -1,0 +1,78 @@
+name: Sync ProjectReLink upstream
+
+on:
+  schedule:
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'ffffffuck/ProjectReLink-GyroRumble'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/pixl27/ProjectReLink.git
+          git fetch upstream main
+
+      - name: Check for upstream changes
+        id: changes
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream is already included in main." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream has new commits to review." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Prepare sync branch and check custom patch
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C automation/upstream-sync
+          if ! git merge --no-edit upstream/main; then
+            echo "::error title=Upstream merge conflict::Resolve the upstream conflicts before syncing."
+            exit 1
+          fi
+          if ! git apply --check --ignore-space-change --ignore-whitespace ProjectReLink-GyroRumble.patch; then
+            echo "::error title=Gyro-rumble patch conflict::The upstream changes overlap the custom patch. Update the patch before merging."
+            exit 1
+          fi
+          echo "Upstream merged and the gyro-rumble patch still applies." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push sync branch
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git fetch origin automation/upstream-sync || true
+          git push --force-with-lease origin automation/upstream-sync
+
+      - name: Open or update sync pull request
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          title="Sync ProjectReLink upstream"
+          body="The upstream main branch has new commits. The gyro-rumble patch check passed. The Windows workflow will build and validate this branch; review and merge this pull request to update the fork's main branch."
+          number=$(gh pr list --base main --head automation/upstream-sync --state open --json number --jq '.[0].number // ""')
+          if [[ -n "$number" ]]; then
+            gh pr edit "$number" --title "$title" --body "$body"
+          else
+            gh pr create --base main --head automation/upstream-sync --title "$title" --body "$body"
+          fi
