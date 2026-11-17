@@ -8,7 +8,9 @@
 
 namespace mkwvk {
 
-/// The extensions it needs (VK_NV_low_latency2, VK_KHR_present_id), added to `want` when the device has them
+/// With a positive RX_VK_REFLEX, enables Mesa's implicit VK_LAYER_MESA_anti_lag on Linux before vkCreateInstance
+void reflex_enable_implicit_layer();
+/// The extensions it needs (VK_NV_low_latency2 + VK_KHR_present_id, or VK_AMD_anti_lag), added to `want`
 void reflex_device_extensions(std::vector<const char*>& want, const std::vector<VkExtensionProperties>& all);
 /// Its feature (presentId) into the device's feature chain (*tail), before the features are queried
 void reflex_device_features(void**& tail);
@@ -16,6 +18,8 @@ void reflex_device_features(void**& tail);
 void reflex_device_created();
 /// Reflex can run on this device (VK_NV_low_latency2 and its functions): the Insert menu's row offers it only then
 bool reflex_available();
+bool reflex_is_amd();
+bool reflex_use_main_queue();
 /// Into a swapchain's creation: latency mode on while the row is on, nothing while it is off (the chained struct lives until
 /// the next call)
 void reflex_swapchain_info(VkSwapchainCreateInfoKHR& ci);

@@ -217,6 +217,33 @@ def save_times(work, data):
         print("the build times were not saved (%s)" % e, flush=True)
 
 
+def trim_object_cache(cache):
+    """(relink) The compiled objects of this build kept in the object cache, the others removed; their bytes. An update then
+    compiles only the chunks whose lifted code, headers or flags changed (an engine change in host/ or gpu/ alone: none of the
+    game's 80 chunks) instead of the hour of a first build. The translated C (sa\\gen, ~1.3 GB) and the link's objects still go.
+    RELINK_KEEP_OBJECTS=0: the cache goes too, as before"""
+    if os.environ.get("RELINK_KEEP_OBJECTS", "1") in ("", "0") or not os.path.isdir(cache):
+        shutil.rmtree(cache, ignore_errors=True)
+        return 0
+    try:
+        with open(os.path.join(cache, "in_use.txt")) as f:
+            keep = {line.strip() + ".o" for line in f if line.strip()}
+    except OSError:   # (no list: a build that did not get to the end of its compile keeps nothing)
+        shutil.rmtree(cache, ignore_errors=True)
+        return 0
+    kept = 0
+    for name in os.listdir(cache):
+        path = os.path.join(cache, name)
+        if name in keep:
+            kept += os.path.getsize(path)
+        elif name != "in_use.txt":
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    return kept
+
+
 def record_times(work, files, compile_seconds, total_seconds, modules=0, kind="build"):
     """This build in the record: what each module it compiled took (a module a cache already held keeps the time it took
     before), the compile's and the whole build's seconds. Returns the last build's total, to show beside this one."""
@@ -1437,9 +1464,11 @@ def main(a=None):
         # ready, on Windows and Linux alike. The next update translates and compiles again, about as long as a first build.
         # RELINK_KEEP_BUILD_FILES=1 keeps them for quick updates, as before)
         if os.environ.get("RELINK_KEEP_BUILD_FILES", "0") in ("", "0"):
-            for sub in ("sa", "objcache", "probe"):
+            for sub in ("sa", "probe"):
                 shutil.rmtree(os.path.join(work, sub), ignore_errors=True)
-            print("the build files in %s were deleted (RELINK_KEEP_BUILD_FILES=1 keeps them for quicker updates)" % work, flush=True)
+            kept = trim_object_cache(os.path.join(work, "objcache"))
+            print("the build files in %s were deleted; %d MB of compiled objects kept for the next update (RELINK_KEEP_OBJECTS=0: "
+                  "none; RELINK_KEEP_BUILD_FILES=1 keeps everything)" % (work, kept >> 20), flush=True)
     total_seconds = time.time() - STARTED
     previous = record_times(work, run_files, compile_seconds, total_seconds, modules=plan[1],
                             kind="update" if a.update else "build")

@@ -133,6 +133,9 @@ Designed after totk-pc-recomp's runtime/vk_*.c (MIT) and Eden's renderer_vulkan,
   lean start, every PC's since 0.7.6, removes.
 - **Uniform updates** (`UPDATE_UB`) go to guest memory at the end of their recording; draws after one bind a copy
   of the range with it applied (`ub_overlay`).
+- **Direct uniform buffers** are copied once into each recording's stream. An imported pool aliases guest RAM, which
+  the CPU can rewrite after present while the prior frame is still on the GPU; a queue-ordered VRAM mirror remains
+  zero-copy. `RX_VK_UB_SNAPSHOT=0` restores direct bindings for diagnosis, and `=1` copies mirrored ranges too.
 - **The VRAM mirror** (`vk_memory.cpp`, TOTK's): pools bound as buffers get a device-local copy at the next
   submission; CPU-written pages are copied in at each submission's first use, GPU writes go back to guest memory at
   its end. `RX_VK_MIRROR=0` turns it off, `RX_VK_MIRROR_MB` (3072) is its budget.

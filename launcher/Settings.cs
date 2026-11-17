@@ -37,6 +37,49 @@ static class Game
     /// The folder keeps the game files it was built from: an update needs nothing else
     public static bool KeepsGameFiles(string folder) =>
         Directory.Exists(Path.Combine(folder, ".relink_exefs")) && Directory.Exists(Path.Combine(folder, "romfs"));
+
+    /// The prepared shaders, beside the game's program (gpu/vk: the translated programs and their index, the driver's
+    /// pipeline cache, the stamp of the preparation and its markers). Without them the next start prepares them all again.
+    /// Not the lists of what play has used (relink_pipeline_states.bin, relink_computes.bin) nor anything the build made
+    /// (relink_shaders.bin, the _shipped files)
+    static readonly string[] PreparedShaderFiles =
+    {
+        "relink_programs.bin", "relink_programs.idx", "relink_pipelines.bin", "relink_prepared.bin",
+        "relink_prepared.bin.warming", "relink_prepare_skipped",
+    };
+
+    /// The prepared shaders' files that are there, and their size in bytes
+    public static (int Files, long Bytes) PreparedShaders(string folder)
+    {
+        int n = 0;
+        long bytes = 0;
+        var dir = Path.GetDirectoryName(Exe(folder)) ?? folder;
+        foreach (var name in PreparedShaderFiles)
+        {
+            var f = new FileInfo(Path.Combine(dir, name));
+            if (f.Exists) { n++; bytes += f.Length; }
+        }
+        return (n, bytes);
+    }
+
+    /// The prepared shaders deleted (the game must not be running): null, or why a file could not go
+    public static string? DeletePreparedShaders(string folder)
+    {
+        var dir = Path.GetDirectoryName(Exe(folder)) ?? folder;
+        foreach (var name in PreparedShaderFiles)
+        {
+            var path = Path.Combine(dir, name);
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                return $"{name}: {e.Message}";
+            }
+        }
+        return null;
+    }
 }
 
 /// The options: the game's own file (relink_options.ini in the game folder, the rows of the in-game menu: the game reads it at

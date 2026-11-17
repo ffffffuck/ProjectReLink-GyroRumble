@@ -217,6 +217,35 @@ public partial class MainWindow : Window
         if (folder != "" && Directory.Exists(folder)) Open(folder);
     }
 
+    /// (Game tab, Shaders) the prepared shaders deleted, after a confirmation: the next start prepares them all again
+    void PrepareShadersAgain(object sender, RoutedEventArgs e)
+    {
+        var folder = s.Folder;
+        if (folder == "" || !Game.Installed(folder)) return;
+        if (game != null || Process.GetProcessesByName("relink-game").Length > 0)
+        {
+            MessageBox.Show(this, L("Fermez le jeu d'abord.", "Close the game first."), Texts.Name);
+            return;
+        }
+        var (files, bytes) = Game.PreparedShaders(folder);
+        if (files == 0)
+        {
+            MessageBox.Show(this, L("Il n'y a pas de shaders préparés à supprimer : le prochain lancement les préparera.",
+                                    "There are no prepared shaders to delete: the next start will prepare them."), Texts.Name);
+            return;
+        }
+        var size = bytes >= 1L << 30 ? $"{bytes / (double)(1L << 30):0.0} GB" : $"{bytes >> 20} MB";
+        if (MessageBox.Show(this,
+                L($"Supprimer les shaders préparés ({size}) ? Le prochain lancement les préparera de nouveau, ce qui prend 10 à 15 minutes. Vos sauvegardes ne sont pas touchées.",
+                  $"Delete the prepared shaders ({size})? The next start will prepare them again, which takes 10 to 15 minutes. Your saves are not touched."),
+                Texts.Name, MessageBoxButton.YesNo) != MessageBoxResult.Yes)
+            return;
+        var why = Game.DeletePreparedShaders(folder);
+        MainNote.Text = why == null
+            ? L("Shaders supprimés : ils seront préparés au prochain lancement.", "Shaders deleted: they will be prepared at the next start.")
+            : L("Shaders pas tous supprimés : ", "Not all the shaders could be deleted: ") + why;
+    }
+
     // ================= the window =================
 
     void Minimize(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;

@@ -1,13 +1,12 @@
 // (relink) AMD FidelityFX Super Resolution 3.1's upscaler for vk_dlss.cpp, through AMD's FidelityFX API (vk_fsr.h).
 //
-// AMD's runtime, amd_fidelityfx_vk.dll (the FidelityFX SDK's prebuilt DLL, signed by AMD, MIT), is not linked: fsr_start
-// loads it once the device is made, from the game folder (the folder above bin\, vk_paths.h's rule), then from the exe's own
-// folder, and takes its five entry points by name. Only AMD's API headers are built in (third_party/ffx_api, with AMD's
-// license text). It then makes a small upscaler on this device and lets it go: one that cannot be made means the GPU or its
-// driver lacks what FSR needs, and FSR is not offered. The log's start says which, in one line.
-// The DLL imports Microsoft's Visual C++ runtime (MSVCP140.dll, VCRUNTIME140.dll, VCRUNTIME140_1.dll): where that is not
-// installed the load fails with error 126, which the log line names.
-// RX_VK_FSR=0: the DLL not loaded, FSR not offered. RX_VK_FSR_DEBUG=1: the runtime checks what it is given (FFX's debug
+// AMD's runtime, amd_fidelityfx_vk.dll on Windows or libamd_fidelityfx_vk.so on Linux (the FidelityFX SDK's Vulkan backend,
+// MIT), is not linked: fsr_start loads it once the device is made, from RX_VK_FSR_LIB when set, else from the game folder
+// (the folder above bin\, vk_paths.h's rule), then from the exe's own folder, and takes its five entry points by name.
+// Only AMD's API headers are built in (third_party/ffx_api, with AMD's license text). It then makes a small upscaler on this
+// device and lets it go: one that cannot be made means the GPU or its driver lacks what FSR needs, and FSR is not offered.
+// The log's start says which, in one line.
+// RX_VK_FSR=0: the runtime not loaded, FSR not offered. RX_VK_FSR_DEBUG=1: the runtime checks what it is given (FFX's debug
 // checking), its messages in our log.
 #include "vk_fsr.h"
 
@@ -16,11 +15,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <string>
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
+#if defined(__linux__)
+#include <dlfcn.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
+#if defined(_WIN32) || defined(__linux__)
 #include "third_party/ffx_api/ffx_api.h"
 #include "third_party/ffx_api/ffx_upscale.h"
 #include "third_party/ffx_api/vk/ffx_api_vk.h"
@@ -38,7 +44,7 @@ FsrWhy fsr_why() { return (FsrWhy)g_why.load(std::memory_order_acquire); }
 const char* fsr_version() { return g_version.c_str(); }
 
 void fsr_device_extensions(std::vector<const char*>& want, const std::vector<VkExtensionProperties>& all) {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
     // (the runtime's Vulkan backend takes vkGetBufferMemoryRequirements2KHR by that name through vkGetDeviceProcAddr, the
     // only function it takes by a KHR name; without VK_KHR_get_memory_requirements2 enabled the device gives a null pointer
     // for it, and the test upscaler's creation crashed on a call to address 0. The extension is core since Vulkan 1.1, so
@@ -56,12 +62,16 @@ void fsr_device_extensions(std::vector<const char*>& want, const std::vector<VkE
 #endif
 }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__linux__)
 
 namespace {
 
 struct Api {
+#if defined(_WIN32)
     HMODULE dll = nullptr;
+#else
+    void* dll = nullptr;
+#endif
     PfnFfxCreateContext create = nullptr;
     PfnFfxDestroyContext destroy = nullptr;
     PfnFfxConfigure configure = nullptr;
@@ -74,6 +84,7 @@ bool env_on(const char* name) {
     return e && *e && strcmp(e, "0") != 0;
 }
 
+#if defined(_WIN32)
 /// A wide string as UTF-8, for the log
 std::string utf8(const wchar_t* w, size_t n) {
     const int k = WideCharToMultiByte(CP_UTF8, 0, w, (int)n, nullptr, 0, nullptr, nullptr);
@@ -100,6 +111,65 @@ void folders(std::wstring& game, std::wstring& exe_dir) {
     }
 }
 
+const char* load_error(DWORD e) {
+    switch (e) {
+    case ERROR_MOD_NOT_FOUND: return "a DLL it needs is missing: Microsoft's Visual C++ 2015-2022 runtime (x64)?";
+    case ERROR_BAD_EXE_FORMAT: return "not a 64-bit DLL";
+    case ERROR_INVALID_IMAGE_HASH: return "Windows refused its signature";
+    case ERROR_ACCESS_DENIED: return "access denied";
+    default: return "";
+    }
+}
+#else
+/// A UTF-32 Linux wide string as UTF-8, for the log
+std::string utf8(const wchar_t* w, size_t n) {
+    std::string s;
+    s.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t cp = (uint32_t)w[i];
+        if (cp < 0x80u) {
+            s.push_back((char)cp);
+        } else if (cp < 0x800u) {
+            s.push_back((char)(0xC0u | (cp >> 6)));
+            s.push_back((char)(0x80u | (cp & 0x3Fu)));
+        } else if (cp < 0x10000u) {
+            s.push_back((char)(0xE0u | (cp >> 12)));
+            s.push_back((char)(0x80u | ((cp >> 6) & 0x3Fu)));
+            s.push_back((char)(0x80u | (cp & 0x3Fu)));
+        } else if (cp <= 0x10FFFFu) {
+            s.push_back((char)(0xF0u | (cp >> 18)));
+            s.push_back((char)(0x80u | ((cp >> 12) & 0x3Fu)));
+            s.push_back((char)(0x80u | ((cp >> 6) & 0x3Fu)));
+            s.push_back((char)(0x80u | (cp & 0x3Fu)));
+        } else {
+            s.push_back('?');
+        }
+    }
+    return s;
+}
+
+bool file_exists_linux(const std::string& p) {
+    struct stat st{};
+    return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+void folders_linux(std::string& game, std::string& exe_dir) {
+    char buf[4096];
+    const ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return;
+    buf[n] = '\0';
+    std::string exe(buf, (size_t)n);
+    const size_t slash = exe.find_last_of('/');
+    exe_dir = slash == std::string::npos ? std::string() : exe.substr(0, slash);
+    game = exe_dir;
+    const size_t up = exe_dir.find_last_of('/');
+    if (up != std::string::npos && exe_dir.compare(up + 1, std::string::npos, "bin") == 0) {
+        const std::string above = exe_dir.substr(0, up);
+        if (file_exists_linux(above + "/image.bin")) game = above;
+    }
+}
+#endif
+
 /// FFX's messages (its debug checking, its errors), into our log: the first 40, then every 1000th
 void message(uint32_t type, const wchar_t* text) {
     static std::atomic<uint64_t> n{0};
@@ -109,16 +179,6 @@ void message(uint32_t type, const wchar_t* text) {
     while (!m.empty() && (m.back() == '\n' || m.back() == '\r')) m.pop_back();
     logf("vk: AMD FSR says (%s, message %llu): %s", type == FFX_API_MESSAGE_TYPE_ERROR ? "error" : "warning",
          (unsigned long long)k + 1, m.c_str());
-}
-
-const char* load_error(DWORD e) {
-    switch (e) {
-    case ERROR_MOD_NOT_FOUND: return "a DLL it needs is missing: Microsoft's Visual C++ 2015-2022 runtime (x64)?";
-    case ERROR_BAD_EXE_FORMAT: return "not a 64-bit DLL";
-    case ERROR_INVALID_IMAGE_HASH: return "Windows refused its signature";
-    case ERROR_ACCESS_DENIED: return "access denied";
-    default: return "";
-    }
 }
 
 /// The upscaler versions the runtime has for Vulkan, its first (the one used) into g_version; false: none
@@ -251,13 +311,13 @@ void fsr_start() {
         logf("vk: AMD FSR: off for this run (RX_VK_FSR=0)");
         return;
     }
+    std::string from_utf8, looked, failed;
+#if defined(_WIN32)
     std::wstring game, exe_dir;
     folders(game, exe_dir);
     std::vector<std::wstring> where;
     if (!game.empty()) where.push_back(game);
     if (!exe_dir.empty() && _wcsicmp(exe_dir.c_str(), game.c_str())) where.push_back(exe_dir);
-    std::string looked, failed;
-    std::wstring from;
     for (const auto& d : where) {
         looked += (looked.empty() ? "" : " and ") + utf8(d);
         const std::wstring path = d + L"\\amd_fidelityfx_vk.dll";
@@ -277,7 +337,7 @@ void fsr_start() {
             }
         }
         if (api.dll) {
-            from = path;
+            from_utf8 = utf8(path);
             break;
         }
         char b[320];
@@ -296,16 +356,60 @@ void fsr_start() {
     api.configure = (PfnFfxConfigure)(void*)GetProcAddress(api.dll, "ffxConfigure");
     api.query = (PfnFfxQuery)(void*)GetProcAddress(api.dll, "ffxQuery");
     api.dispatch = (PfnFfxDispatch)(void*)GetProcAddress(api.dll, "ffxDispatch");
+#else
+    std::vector<std::string> candidates;
+    if (const char* env_lib = getenv("RX_VK_FSR_LIB"); env_lib && *env_lib) {
+        candidates.emplace_back(env_lib);
+    } else {
+        std::string game, exe_dir;
+        folders_linux(game, exe_dir);
+        if (!game.empty()) candidates.push_back(game + "/libamd_fidelityfx_vk.so");
+        if (!exe_dir.empty() && exe_dir != game) candidates.push_back(exe_dir + "/libamd_fidelityfx_vk.so");
+    }
+    for (const auto& path : candidates) {
+        looked += (looked.empty() ? "" : " and ") + path;
+        if (!file_exists_linux(path)) continue;
+        dlerror();
+        api.dll = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (api.dll) {
+            from_utf8 = path;
+            break;
+        }
+        const char* err = dlerror();
+        char b[384];
+        snprintf(b, sizeof b, "%s%s did not load (%s)", failed.empty() ? "" : "; ", path.c_str(),
+                 err && *err ? err : "dlopen failed");
+        failed += b;
+    }
+    if (!api.dll) {
+        g_why = failed.empty() ? FSR_NO_RUNTIME : FSR_RUNTIME_FAILED;
+        if (failed.empty()) logf("vk: AMD FSR: not available: no libamd_fidelityfx_vk.so at %s", looked.c_str());
+        else logf("vk: AMD FSR: not available: %s", failed.c_str());
+        return;
+    }
+    api.create = (PfnFfxCreateContext)dlsym(api.dll, "ffxCreateContext");
+    api.destroy = (PfnFfxDestroyContext)dlsym(api.dll, "ffxDestroyContext");
+    api.configure = (PfnFfxConfigure)dlsym(api.dll, "ffxConfigure");
+    api.query = (PfnFfxQuery)dlsym(api.dll, "ffxQuery");
+    api.dispatch = (PfnFfxDispatch)dlsym(api.dll, "ffxDispatch");
+    if (!api.create || !api.destroy || !api.configure || !api.query || !api.dispatch) {
+        dlclose(api.dll);
+        api = {};
+        g_why = FSR_RUNTIME_FAILED;
+        logf("vk: AMD FSR: not available: %s is not AMD's FidelityFX API (an entry point is missing)", from_utf8.c_str());
+        return;
+    }
+#endif
     if (!api.create || !api.destroy || !api.configure || !api.query || !api.dispatch) {
         api = {};
         g_why = FSR_RUNTIME_FAILED;
-        logf("vk: AMD FSR: not available: %s is not AMD's FidelityFX API (an entry point is missing)", utf8(from).c_str());
+        logf("vk: AMD FSR: not available: %s is not AMD's FidelityFX API (an entry point is missing)", from_utf8.c_str());
         return;
     }
     if (!versions()) {
         api.create = nullptr;
         g_why = FSR_NO_UPSCALER;
-        logf("vk: AMD FSR: not available: %s has no upscaler for Vulkan", utf8(from).c_str());
+        logf("vk: AMD FSR: not available: %s has no upscaler for Vulkan", from_utf8.c_str());
         return;
     }
     // (a small upscaler made on this device and let go at once, before anything is recorded with it: its creation makes
@@ -313,7 +417,7 @@ void fsr_start() {
     // first time on a PC that takes most of a second (864 ms on an RTX 3060 Ti), which the game's start need not wait for,
     // and the driver keeps the pipelines, so the upscaler made in play takes some 15 ms. Until it ends FSR is not offered
     // (FSR_NOT_STARTED). The device lives until the process ends: nothing destroys it under the thread)
-    std::thread([path = utf8(from)] {
+    std::thread([path = from_utf8] {
         const auto t0 = std::chrono::steady_clock::now();
         FsrContext* test = fsr_create(256, 144, 512, 288, 0);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -324,13 +428,13 @@ void fsr_start() {
             return;
         }
         fsr_destroy(test);
-        g_why = FSR_OK;
+        g_why.store(FSR_OK, std::memory_order_release);
         logf("vk: AMD FSR: available (%s, from %s; a test upscaler made on %s in %.0f ms)", g_version.c_str(), path.c_str(),
              dev.props.deviceName, ms);
     }).detach();
 }
 
-#else  // (AMD's FidelityFX runtime is a Windows DLL: FSR is not offered elsewhere)
+#else  // (platforms without Windows/Linux dynamic loader support)
 
 struct FsrContext {};
 FsrContext* fsr_create(uint32_t, uint32_t, uint32_t, uint32_t, unsigned) { return nullptr; }
@@ -343,7 +447,7 @@ void fsr_start() {
     if (started) return;
     started = true;
     g_why = FSR_NOT_WINDOWS;
-    logf("vk: AMD FSR: not available: AMD's FidelityFX runtime (amd_fidelityfx_vk.dll) is for Windows only");
+    logf("vk: AMD FSR: not available: unsupported host platform");
 }
 
 #endif

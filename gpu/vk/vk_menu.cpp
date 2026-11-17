@@ -37,6 +37,7 @@
 #include "vk_draw.h"   // (pipeline_cache_save: Restart now keeps what was built)
 #include "oot_cheat_items.h"
 #include "oot_teleport_capture.h"   // (relink: the Travel page's pictures)
+#include "hos_volume.h"   // (relink: the Volume row's option id)
 #include "oot_tp_places.h"   // (relink: the Travel page's places)
 #include "prompt_tex.h"   // (relink: the HUD cross's letters follow the button font)
 #include "vk_screenshot.h"   // (relink: F12)
@@ -123,14 +124,21 @@ const char* tx_upscale(int v) {
 /// The Window scaling filter row's value: its filter, or that none is needed (the saved value stays, for another window size)
 const char* tx_filter(int v) { return filter_needed() ? tx_upscale(v) : "Not needed (window = output)"; }
 const char* tx_reflex(int v) {
+    if (reflex_is_amd()) return v > 0 ? "On (AMD Anti-Lag 2)" : "Off";
     static const char* t[] = {"Off", "On", "On + Boost"};
     return t[reflex_available() ? std::clamp(v, 0, 2) : 0];
 }
-/// Reflex: on the value, or that it is not available here (the row shows Off)
+/// Reflex / Anti-Lag: on the value, or that it is not available here (the row shows Off)
 const char* hn_reflex(int v, int variant) {
     static const char* const t[] = {"The game as without it.", "The driver paces the frames for less latency.",
                                     "As On, and the GPU's clocks are kept up as well."};
-    static const char* const none = "Not available here: it needs an NVIDIA GPU whose driver has VK_NV_low_latency2.";
+    static const char* const t_amd[] = {"The game as without it.",
+                                        "AMD Anti-Lag 2 (VK_AMD_anti_lag) paces CPU simulation to reduce input latency."};
+    static const char* const none = "Not available here: needs VK_NV_low_latency2 (NVIDIA) or VK_AMD_anti_lag (AMD).";
+    if (reflex_is_amd()) {
+        const char* cur = t_amd[v > 0 ? 1 : 0];
+        return variant < 0 || variant == 0 ? cur : variant == 1 ? none : nullptr;
+    }
     if (variant < 0) return reflex_available() ? t[std::clamp(v, 0, 2)] : none;
     return variant == 0 ? t[std::clamp(v, 0, 2)] : variant == 1 ? none : nullptr;
 }
@@ -171,9 +179,15 @@ const char* hn_upscaler(int v, int variant) {
         "AMD FSR: not started yet.",
         "AMD FSR: Windows only.",
         "AMD FSR: off for this run (RX_VK_FSR=0).",
+#if defined(__linux__)
+        "AMD FSR: libamd_fidelityfx_vk.so is not in the game folder (nor set in RX_VK_FSR_LIB).",
+        "AMD FSR: libamd_fidelityfx_vk.so did not load (the log says why).",
+        "AMD FSR: libamd_fidelityfx_vk.so has no upscaler for Vulkan.",
+#else
         "AMD FSR: AMD's amd_fidelityfx_vk.dll is not in the game folder.",
         "AMD FSR: amd_fidelityfx_vk.dll did not load (the log says why; it needs Microsoft's Visual C++ runtime).",
         "AMD FSR: amd_fidelityfx_vk.dll has no upscaler for Vulkan.",
+#endif
         "AMD FSR: this GPU or its driver cannot run it.",
     };
     // (now: the value shown and what runs here; every one: each value, and the game's own with each pair of reasons)
@@ -528,8 +542,8 @@ Row rows[] = {
      "Makes frames between the game's own, for smoother motion, at a little input delay. Fast motion or camera cuts can "
      "show artifacts.", hn_framegen},
     {TAB_GRAPHICS, "Frame pacing", &opts.pace, 0, 1, 1, tx_onoff, "When each frame is shown.", hn_pace},
-    {TAB_GRAPHICS, "NVIDIA Reflex", &opts.reflex, 0, 2, 1, tx_reflex,
-     "NVIDIA GPUs: each frame starts as late as it can, for less input delay. Not used with frame generation.", hn_reflex},
+    {TAB_GRAPHICS, "Low latency", &opts.reflex, 0, 2, 1, tx_reflex,
+     "NVIDIA Reflex / AMD Anti-Lag 2: starts each frame as late as it can, for less input delay. Not used with frame generation.", hn_reflex},
     // (the picture's way, top to bottom: the output's size, what fills it from the 3D, the 3D's size, then the window)
     {TAB_GRAPHICS, "Output resolution", &opts.output_res, 0, kLastOutput, 1, tx_output_res,
      "The game's whole frame, HUD included, before it is scaled to the window. Docked only. Applies after a restart.",
@@ -561,6 +575,8 @@ Row rows[] = {
      hn_speed},
     {TAB_GAMEPLAY, "Text speed", &opts.text_speed, 0, 3, 1, tx_text_speed,
      "How fast the letters of dialogue and other messages appear.", hn_text_speed},
+    {TAB_GAMEPLAY, "Volume", &opts.volume, 0, 100, 5, tx_percent,   // (relink: host/nn_audio.c)
+     "The game's sound: music, effects and voices together. 0% mutes it.", nullptr, false, true},
     {TAB_GAMEPLAY, "Audio output", &opts.audio_output, 0, 2, 1, tx_audio_output,
      "The speakers the game mixes its sound for. Applies after a restart.", hn_audio_output, true, true},
     {TAB_GAMEPLAY, "Microphone", &opts.mic, 0, 2 + kMaxMics, 1, tx_mic,
@@ -811,9 +827,9 @@ bool mouse_read = false;   // (the menu has read the mouse since it opened)
 // (the Cheats page's and the list pages' record of each shown row's or line's value's left edge: the menu's width, none)
 int cheat_value_l[kCheatRows];
 int list_value_l[kTeleportLines];
-bool is_slider(const Row& r) { return r.value == &opts.sharpness || r.value == &opts.mouse_sens || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y; }
+bool is_slider(const Row& r) { return r.value == &opts.sharpness || r.value == &opts.mouse_sens || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.volume; }
 /// (a scale: the arrows, a click and the wheel stop at its ends; Rumble strength would go from Off to its strongest)
-bool stops_at_ends(const Row& r) { return r.value == &opts.mouse_sens || r.value == &opts.rumble || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.deadzone_l || r.value == &opts.deadzone_r || r.value == &opts.fov; }
+bool stops_at_ends(const Row& r) { return r.value == &opts.mouse_sens || r.value == &opts.rumble || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.deadzone_l || r.value == &opts.deadzone_r || r.value == &opts.fov || r.value == &opts.volume; }
 /// (the ini's Rumble strength on the menu's steps: 0 to 150, the nearest 25)
 int rumble_step(int v) { return (std::min(std::max(v, 0), 150) + 12) / 25 * 25; }
 std::string ini_path() {
@@ -2026,7 +2042,11 @@ Upload ups[4][3];   // (the menu's, the counter's, the start-up screen's, (relin
 
 void copy_over(VkCommandBuffer cmd, VkImage dst, Bitmap& b, Upload& u, int x, int y, uint32_t w, uint32_t h) {
     std::lock_guard lk(bmp_mu);
-    if (!b.w || (uint32_t)x + b.w > w || (uint32_t)y + b.h > h) return;
+    // (relink, issue 96) the part inside the window: a bitmap that went past its edge was not drawn at all, and in a 1280x720
+    // window the Insert menu (726 lines at a scale of 1 since 0.7.9's rows) never showed
+    const int cx0 = std::max(0, -x), cy0 = std::max(0, -y);
+    const int cx1 = std::min((int)b.w, (int)w - x), cy1 = std::min((int)b.h, (int)h - y);
+    if (!b.w || cx0 >= cx1 || cy0 >= cy1) return;
     const uint64_t size = (uint64_t)b.w * b.h * 4;
     if (u.size < size) {
         // (the slot's own frame is over before the slot is used again: its smaller buffer can go. It stayed for good before, which
@@ -2039,15 +2059,26 @@ void copy_over(VkCommandBuffer cmd, VkImage dst, Bitmap& b, Upload& u, int x, in
     if (u.version != b.version) std::memcpy(u.map, b.px.data(), size), u.version = b.version;
     if (b.keyed) {
         static thread_local std::vector<VkBufferImageCopy> at;
-        at = b.runs;
-        for (auto& r : at) r.imageOffset.x += x, r.imageOffset.y += y;
+        at.clear();
+        for (const auto& r : b.runs) {   // (each run one line of the bitmap: the lines and the parts of lines outside left out)
+            const int ry = r.imageOffset.y, rx0 = std::max(r.imageOffset.x, cx0);
+            const int rx1 = std::min(r.imageOffset.x + (int)r.imageExtent.width, cx1);
+            if (ry < cy0 || ry >= cy1 || rx0 >= rx1) continue;
+            VkBufferImageCopy c = r;
+            c.bufferOffset += (uint64_t)(rx0 - r.imageOffset.x) * 4;
+            c.imageOffset.x = rx0 + x, c.imageOffset.y = ry + y;
+            c.imageExtent.width = (uint32_t)(rx1 - rx0);
+            at.push_back(c);
+        }
         if (!at.empty()) vkCmdCopyBufferToImage(cmd, u.buf, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)at.size(), at.data());
         return;
     }
     VkBufferImageCopy c{};
+    c.bufferOffset = ((uint64_t)cy0 * b.w + cx0) * 4;
+    c.bufferRowLength = b.w;
     c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    c.imageOffset = {x, y, 0};
-    c.imageExtent = {b.w, b.h, 1};
+    c.imageOffset = {x + cx0, y + cy0, 0};
+    c.imageExtent = {(uint32_t)(cx1 - cx0), (uint32_t)(cy1 - cy0), 1};
     vkCmdCopyBufferToImage(cmd, u.buf, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
 }
 
@@ -2150,6 +2181,7 @@ void menu_init() {
         opts.deadzone_l = std::min(std::max(opts.deadzone_l, 0), 50) / 2 * 2;   // (relink: host/hos_stick.h)
         opts.deadzone_r = std::min(std::max(opts.deadzone_r, 0), 50) / 2 * 2;
         opts.fov = std::min(std::max(opts.fov, 70), 150) / 5 * 5;   // (relink: nx2/oot_fov.py)
+        opts.volume = std::min(std::max(opts.volume, 0), 100) / 5 * 5;   // (relink: host/nn_audio.c)
         // (Game speed is Real time by default now: Per frame played at half speed at 30 fps, the "slow motion" players
         // reported. An options file from before kept the old default whether chosen or not: Real time for it too)
         if (!v2) opts.realtime = 1;
@@ -2932,7 +2964,9 @@ void menu_record(VkCommandBuffer cmd, VkImage dst, int slot, uint32_t w, uint32_
         VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         di.memoryBarrierCount = 1, di.pMemoryBarriers = &mb;
         vkCmdPipelineBarrier2(cmd, &di);
-        if (mw) copy_over(cmd, dst, menu_bmp, ups[0][slot], (int)(w - mw) / 2, (int)(h - mh) / 2, w, h);
+        int x0 = 0, y0 = 0;   // (the place the mouse's hits are read against: menu_tick)
+        menu_hit::origin((int)w, (int)h, (int)mw, (int)mh, &x0, &y0);
+        if (mw) copy_over(cmd, dst, menu_bmp, ups[0][slot], x0, y0, w, h);
     }
 }
 

@@ -17,6 +17,7 @@ enum { K_MUTEX = 1, K_COND, K_EVENT, K_SEMA, K_QUEUE, K_RWLOCK, K_MULTIWAIT, K_H
 typedef struct Obj {
     uint64_t key;
     int kind;
+    uint32_t ix;   /* mutex index in mx_objs once assigned (0: none): see obj_nockpt() */
     SRWLOCK lk;
     CONDITION_VARIABLE cv;
     /* mutex / rwlock */
@@ -201,7 +202,49 @@ static Obj *obj(uint64_t key, int kind) {
    poke_multiwait: a stall until the vcore escape). Brought here on 12/11 with the escape fix (hos_thread.c
    hos_vcore_away), which needs it: with threads taking a core again after an escape, OoT's audio thread stood in
    event_signal behind mw_lock 77 % of the time, holding its core (hs1511), and the game started at 0.3 frames a second. */
+/* (PR 83) Direct mutex host-object lookup via nn::os::MutexType + 8
+   (the SDK's unused nesting-count field; HLE tracks count in Obj::count). Validated against Obj::key and Obj::kind
+   so copied, zeroed, or reused guest memory safely falls back to obj_nockpt_slow() and renumbers.
+   HOS_MUTEX_IX=1 enables (default off). */
+#define MX_IX_OFFSET 8
+#define MX_IX_CAP (1u << 20)
+static Obj *mx_objs[MX_IX_CAP];
+static volatile long mx_next = 1;
+static int mx_ix_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("HOS_MUTEX_IX"); v = e && atoi(e) != 0; }
+    return v;
+}
+static Obj *obj_nockpt_slow(uint64_t key, int kind);
 static Obj *obj_nockpt(uint64_t key, int kind) {
+    if (kind != K_MUTEX || !key || !mx_ix_on()) return obj_nockpt_slow(key, kind);
+    uint32_t *at = (uint32_t *)GP(key + MX_IX_OFFSET);
+    const uint32_t ix = __atomic_load_n(at, __ATOMIC_RELAXED);
+    if (ix && ix < MX_IX_CAP) {
+        Obj *o = __atomic_load_n(&mx_objs[ix], __ATOMIC_ACQUIRE);
+        if (o && __atomic_load_n(&o->key, __ATOMIC_RELAXED) == key && __atomic_load_n(&o->kind, __ATOMIC_ACQUIRE) == K_MUTEX)
+            return o;
+    }
+    Obj *o = obj_nockpt_slow(key, kind);
+    uint32_t mine = __atomic_load_n(&o->ix, __ATOMIC_RELAXED);
+    if (!mine && __atomic_load_n(&mx_next, __ATOMIC_RELAXED) < (long)MX_IX_CAP) {
+        const long n = __sync_fetch_and_add(&mx_next, 1);
+        if (n < (long)MX_IX_CAP) {
+            uint32_t none = 0;
+            if (__atomic_compare_exchange_n(&o->ix, &none, (uint32_t)n, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+                __atomic_store_n(&mx_objs[n], o, __ATOMIC_RELEASE);
+                mine = (uint32_t)n;
+            } else {
+                mine = none;
+            }
+        }
+    }
+    if (mine && __atomic_load_n(&mx_objs[mine], __ATOMIC_RELAXED) == o &&
+        __atomic_load_n(at, __ATOMIC_RELAXED) != mine)
+        __atomic_store_n(at, mine, __ATOMIC_RELAXED);
+    return o;
+}
+static Obj *obj_nockpt_slow(uint64_t key, int kind) {
     /* (relink: 128 still missed: obj_lookup was the busiest leaf in dense Kokiri, 3.2% of all samples, 4.3% of the instants when one
        thread alone ran; each actor has its own mutexes) */
     /* (relink: 4096; at 1024 obj_lookup was still 2.2% of OoT's game threads outdoors) */
@@ -552,6 +595,7 @@ HLE(_ZN2nn2os15InitializeMutexEPNS0_9MutexTypeEbi) {
 }
 HLE(_ZN2nn2os13FinalizeMutexEPNS0_9MutexTypeE) {
     if (watched(ARG(0))) watch_log("finalize", ARG(0), 0, c, NULL);
+    if (ARG(0) && mx_ix_on()) __atomic_store_n((uint32_t *)GP(ARG(0) + MX_IX_OFFSET), 0u, __ATOMIC_RELAXED);
     drop(ARG(0));
 }
 HLE(_ZN2nn2os9LockMutexEPNS0_9MutexTypeE) {

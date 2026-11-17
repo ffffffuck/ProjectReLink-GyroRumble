@@ -16,6 +16,9 @@
 #endif
 #include <windows.h>
 #include <psapi.h>
+#ifdef _WIN32
+#include <dxgi.h>   // (igpu-fix: an integrated GPU's own memory, igpu_dedicated_bytes)
+#endif
 #if defined(__linux__)
 #include <malloc.h>
 #endif
@@ -28,6 +31,8 @@
 #include <unordered_set>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
+#include <functional>
 #include <thread>
 #include <tuple>
 #include <unordered_set>
@@ -43,6 +48,10 @@
 #include <span>
 
 #include "video_core/textures/astc.h"
+#include "astcenc.h"   // (igpu-fix: ARM's ASTC decoder, gpu/third_party/astcenc)
+#define STB_DXT_STATIC
+#define STB_DXT_IMPLEMENTATION
+#include "../third_party/stb_dxt/stb_dxt.h"   // (igpu-fix: the CPU's BC3 encoder, astc_bc3_cpu)
 #include "video_core/textures/decoders.h"
 
 #include "host_shaders/astc_decoder_comp_spv.h"
@@ -51,6 +60,7 @@
 #include "astc_bc_policy.h"
 #include "keep_rendered.h"
 #include "prompt_tex.h"
+#include "ocarina_tex.h"
 #include "target_overlap.h"
 #include "host_shaders/block_linear_unswizzle_2d_comp_spv.h"
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
@@ -277,9 +287,36 @@ const uint64_t kSpareBytes = (uint64_t)(getenv("RX_VK_SPARE_MB") ? std::max(16, 
 // (Simulated here with RX_VK_COMMIT_FREE_MB=9000, hs2578: no spares, the textures held at 3 GB, the picture whole, 50-54 fps
 // for 54-57 on the same route)
 uint64_t commit_left_bytes = UINT64_MAX, commit_total_bytes = 0, ram_total_bytes = 0;
+#ifdef _WIN32
+/// (igpu-fix) Whether a page file is sized by Windows ("System managed size": "c:\pagefile.sys 0 0" or "?:\pagefile.sys" in
+/// PagingFiles): Windows grows it as commits need it, so what is left to commit now is not the limit it looks like
+bool pagefile_grows() {
+    static const bool grows = [] {
+        char buf[4096] = {};
+        DWORD n = sizeof buf - 2, type = 0;
+        HKEY k;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management", 0,
+                          KEY_QUERY_VALUE, &k) != ERROR_SUCCESS)
+            return false;
+        const bool ok = RegQueryValueExA(k, "PagingFiles", nullptr, &type, (LPBYTE)buf, &n) == ERROR_SUCCESS && type == REG_MULTI_SZ;
+        RegCloseKey(k);
+        if (!ok) return false;
+        for (const char* e = buf; *e; e += strlen(e) + 1) {
+            unsigned lo = 1, hi = 1;
+            const char* sp = strchr(e, ' ');
+            if (e[0] == '?' || (sp && sscanf(sp, "%u %u", &lo, &hi) == 2 && lo == 0 && hi == 0)) return true;
+        }
+        return false;
+    }();
+    return grows;
+}
+#endif
 uint64_t commit_short(uint64_t frame) {
 #ifdef _WIN32
-    static const uint64_t headroom = (uint64_t)(getenv("RX_VK_COMMIT_FREE_MB") ? std::max(0, atoi(getenv("RX_VK_COMMIT_FREE_MB"))) : 2048) << 20;
+    // (igpu-fix) 512 MB where Windows grows the page file: with 2048 a ROG Xbox Ally X sat at 1.4 GB left, and its texture budget
+    // was cut under what the scene draws, the textures in use let go and made again every few frames
+    static const uint64_t headroom = (uint64_t)(getenv("RX_VK_COMMIT_FREE_MB") ? std::max(0, atoi(getenv("RX_VK_COMMIT_FREE_MB")))
+                                                : pagefile_grows() && amd_igpu() ? 512 : 2048) << 20;
     static uint64_t asked = UINT64_MAX;
     if (asked == UINT64_MAX || frame - asked >= 30) {
         asked = frame;
@@ -316,6 +353,7 @@ VkCommandBuffer upload_cmd() {
     if (!up_used) {
         up_used = true;
         full_barrier(up_cmd);   // (after the work submitted before: it may still read what is replaced)
+        checkpoint_note(up_cmd, rec_value, 'S', "its uploads (run before its draws)");
     }
     return up_cmd;
 }
@@ -426,11 +464,272 @@ struct AstcPush {
 VkDescriptorSetLayout astc_set = VK_NULL_HANDLE;
 VkPipelineLayout astc_layout = VK_NULL_HANDLE;
 VkPipeline astc_pipe = VK_NULL_HANDLE;
+/// (igpu-fix) An AMD integrated GPU (a Radeon 890M in a ROG Xbox Ally X, AMD's 26.10 driver): with the ASTC decoder and the
+/// unswizzle on the GPU the device was lost a few frames after a save's area loaded, every time, whatever the present mode,
+/// the window mode or the texture budget; with both on the CPU (RX_VK_ASTC_CPU=1 RX_VK_GPU_UNSWIZZLE=0) it never was. The
+/// default there is the CPU for both. RX_VK_ASTC_CPU=0 / RX_VK_GPU_UNSWIZZLE=1 put them back on the GPU
+}  // namespace
+/// (igpu-fix) The GPU these defaults were found on: an AMD integrated GPU with AMD's own Windows driver (a Radeon 890M, a ROG
+/// Xbox Ally X, driver 26.10). Not RADV (Linux handhelds such as the Steam Deck): nothing was seen there
+bool amd_igpu() {
+    static const bool yes = [] {
+        if (dev.props.vendorID != 0x1002 || dev.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) return false;
+        VkPhysicalDeviceDriverProperties dp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        p2.pNext = &dp;
+        vkGetPhysicalDeviceProperties2(dev.physical, &p2);
+        return dp.driverID == VK_DRIVER_ID_AMD_PROPRIETARY;
+    }();
+    return yes;
+}
+namespace {
+/// (igpu-fix) The memory set aside for an AMD integrated GPU alone (the "UMA frame buffer" in the BIOS: 8 GB on a ROG Xbox Ally X,
+/// 512 MB to 2 GB on most laptops), as Windows reports it (DXGI's dedicated video memory); 0 when not known
+uint64_t igpu_dedicated_bytes() {
+#ifdef _WIN32
+    static const uint64_t bytes = [] {
+        uint64_t best = 0;
+        HMODULE m = LoadLibraryA("dxgi.dll");
+        using Create = HRESULT(WINAPI*)(REFIID, void**);
+        const auto create = m ? (Create)(void*)GetProcAddress(m, "CreateDXGIFactory1") : nullptr;
+        IDXGIFactory1* f = nullptr;
+        if (!create || FAILED(create(__uuidof(IDXGIFactory1), (void**)&f)) || !f) return best;
+        IDXGIAdapter1* a = nullptr;
+        for (UINT i = 0; f->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; i++) {
+            DXGI_ADAPTER_DESC1 d{};
+            if (SUCCEEDED(a->GetDesc1(&d)) && d.VendorId == dev.props.vendorID && d.DeviceId == dev.props.deviceID)
+                best = std::max<uint64_t>(best, (uint64_t)d.DedicatedVideoMemory);
+            a->Release();
+        }
+        f->Release();
+        return best;
+    }();
+    return bytes;
+#else
+    return 0;
+#endif
+}
+bool astc_on_cpu() {
+    static const bool cpu = [] {
+        if (const char* e = getenv("RX_VK_ASTC_CPU")) return *e == 0 || atoi(e) != 0;   // (set alone, or to 1: the CPU, as before)
+        const bool igpu = amd_igpu();
+        if (igpu) logf("vk: an AMD integrated GPU: ASTC textures decoded on the CPU (RX_VK_ASTC_CPU=0: on the GPU)");
+        return igpu;
+    }();
+    return cpu;
+}
+/// (igpu-fix) The ASTC decode on the CPU (astc_on_cpu), its rows of blocks shared out among threads: on one thread a scene
+/// change on a Radeon 890M held the replay for up to 21 s (Hyrule Field's terrain arrays, 1365 x 1365 x 90 at 8 x 8), the
+/// stutter as the camera moved. RX_VK_ASTC_THREADS=<n>: that many (1: on the replay thread alone, as before)
+/// (igpu-fix) Threads kept for the CPU's texture work (ASTC decode, BC3 encode): a texture of 90 layers and 11 levels is ~1000
+/// calls, and with threads made and joined for each the small levels ran on one thread and the making cost as much as the
+/// work (the terrain's arrays: 0.5 s of decode and 0.9 s of encode each on a Ryzen Z2 Extreme). parallel_for(n, fn) runs
+/// fn(0..n-1) on them and the caller, and returns once all are done; one caller at a time
+uint32_t astc_cpu_threads();
+class TexturePool {
+public:
+    explicit TexturePool(uint32_t threads) {
+        for (uint32_t i = 0; i + 1 < threads; i++) workers_.emplace_back([this] { run(); });
+    }
+    uint32_t size() const { return (uint32_t)workers_.size() + 1; }
+    void parallel_for(uint32_t n, const std::function<void(uint32_t)>& fn) {
+        if (n <= 1 || workers_.empty()) {
+            for (uint32_t i = 0; i < n; i++) fn(i);
+            return;
+        }
+        // (each call a batch of its own, held by every thread working on it: a worker still in an earlier batch never takes
+        // this one's indices against the earlier one's count)
+        const auto b = std::make_shared<Batch>();
+        b->fn = &fn, b->n = n, b->left.store(n);
+        {
+            std::lock_guard lk(mu_);
+            batch_ = b;
+        }
+        cv_.notify_all();
+        work(*b);
+        std::unique_lock lk(b->mu);
+        b->done.wait(lk, [&] { return b->left.load() == 0; });
+        std::lock_guard qk(mu_);
+        if (batch_ == b) batch_.reset();
+    }
+
+private:
+    struct Batch {
+        const std::function<void(uint32_t)>* fn = nullptr;
+        uint32_t n = 0;
+        std::atomic<uint32_t> next{0}, left{0};
+        std::mutex mu;
+        std::condition_variable done;
+    };
+    static void work(Batch& b) {
+        for (uint32_t i; (i = b.next.fetch_add(1)) < b.n;) {
+            (*b.fn)(i);
+            if (b.left.fetch_sub(1) == 1) {
+                std::lock_guard lk(b.mu);
+                b.done.notify_all();
+            }
+        }
+    }
+    void run() {
+#ifdef _WIN32
+        // (below normal, as the shader translation's workers (vk_jobs.cpp): at normal priority the texture work took the cores from
+        // them during a scene change, and draws waited on shaders for 15-30 s on a ROG Xbox Ally X)
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+        std::shared_ptr<Batch> seen;
+        for (;;) {
+            std::shared_ptr<Batch> b;
+            {
+                std::unique_lock lk(mu_);
+                cv_.wait(lk, [&] { return batch_ && batch_ != seen; });
+                b = batch_;
+            }
+            seen = b;
+            work(*b);
+        }
+    }
+    std::vector<std::thread> workers_;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::shared_ptr<Batch> batch_;
+};
+TexturePool& texture_pool() {
+    static TexturePool* pool = new TexturePool(astc_cpu_threads());   // (never destroyed: its threads live as long as the process)
+    return *pool;
+}
+
+std::atomic<int64_t> st_astc_cpu_ns{0}, st_astc_cpu_texels{0};   // (igpu-fix: the CPU's ASTC decode, for the slow upload lines)
+/// (igpu-fix) ARM's decoder (astcenc 5.7.0): 3-4x suyu's on the same blocks, the same texels within 1 of 255 (its UNORM8
+/// rounding, as the spec has it). One context for each block size, for every thread at once: the threads share one image's
+/// blocks out among them (astcenc_decompress_image with thread_index). false: not decoded (no context): suyu's instead
+bool astc_decode_arm(const uint8_t* blocks, uint64_t block_bytes, uint32_t w, uint32_t h, uint32_t d, uint32_t bw, uint32_t bh,
+                     uint8_t* out, uint32_t threads) {
+    static const bool off = getenv("RX_VK_ASTC_DECODER") && !strcmp(getenv("RX_VK_ASTC_DECODER"), "suyu");
+    if (off) return false;
+    struct Ctx { astcenc_context* ctx = nullptr; std::mutex mu; };
+    static std::mutex map_mu;
+    static std::map<uint32_t, std::unique_ptr<Ctx>> ctxs;
+    Ctx* c;
+    {
+        std::lock_guard lk(map_mu);
+        auto& slot = ctxs[bw << 8 | bh];
+        if (!slot) {
+            slot = std::make_unique<Ctx>();
+            astcenc_config cfg{};
+            if (astcenc_config_init(ASTCENC_PRF_LDR, bw, bh, 1, ASTCENC_PRE_FASTEST,
+                                    ASTCENC_FLG_DECOMPRESS_ONLY | ASTCENC_FLG_USE_DECODE_UNORM8, &cfg) != ASTCENC_SUCCESS ||
+                astcenc_context_alloc(&cfg, threads, &slot->ctx, nullptr) != ASTCENC_SUCCESS) {
+                slot->ctx = nullptr;
+                logf("vk: astcenc: no context for %ux%u blocks: suyu's decoder for them", bw, bh);
+            }
+        }
+        c = slot.get();
+    }
+    if (!c->ctx) return false;
+    std::vector<void*> slices(d);
+    for (uint32_t z = 0; z < d; z++) slices[z] = out + (size_t)z * w * h * 4;
+    astcenc_image img{w, h, d, ASTCENC_TYPE_U8, slices.data()};
+    static const astcenc_swizzle swz{ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A};
+    std::lock_guard lk(c->mu);   // (a context decodes one image at a time)
+    const uint32_t n = (uint64_t)w * h * d >= (16u << 10) ? std::min(threads, texture_pool().size()) : 1u;
+    std::atomic<int> failed{0};
+    const std::function<void(uint32_t)> part = [&](uint32_t t) {
+        const astcenc_error e = astcenc_decompress_image(c->ctx, blocks, block_bytes, &img, &swz, t);
+        if (e != ASTCENC_SUCCESS && failed.fetch_add(1) == 0) {
+            static std::atomic<int> told{0};
+            if (told.fetch_add(1) < 8) logf("vk: astcenc: %ux%ux%u at %ux%u: %s", w, h, d, bw, bh, astcenc_get_error_string(e));
+        }
+    };
+    texture_pool().parallel_for(n, part);
+    astcenc_decompress_reset(c->ctx);
+    return failed.load() == 0;
+}
+/// (igpu-fix) Large ASTC textures decoded on the CPU kept as BC3, as the GPU decoder keeps them: a quarter of RGBA8. With them
+/// as RGBA8 on a Radeon 890M a scene held 6 GB of textures, the budget's limit, and textures in use were let go and made again
+/// (the minimap drawn with another texture for a frame, black patches). RX_VK_ASTC_CPU_BC=0: as RGBA8, as before
+bool astc_cpu_bc() {
+    static const bool on = [] {
+        if (const char* e = getenv("RX_VK_ASTC_CPU_BC")) return atoi(e) != 0;
+        return true;
+    }();
+    return on && astc_on_cpu() && dev.features.textureCompressionBC;
+}
+std::atomic<int64_t> st_bc3_cpu_ns{0};
+/// w x h x d RGBA8 texels as BC3 blocks (rows of blocks, (w+3)/4 to a row), the rows shared out among threads; the
+/// blocks past the edge take the edge's texels
+void astc_bc3_cpu(const uint8_t* rgba, uint32_t w, uint32_t h, uint32_t d, uint8_t* out, uint32_t threads) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const uint32_t bx = (w + 3) / 4, by = (h + 3) / 4, rows = by * d;
+    (void)threads;
+    const uint32_t n = (uint64_t)w * h * d >= (16u << 10) ? std::min(texture_pool().size() * 2, rows) : 1u;
+    const std::function<void(uint32_t)> part = [&](uint32_t t) {
+        uint8_t blk[64];
+        for (uint32_t r = rows * t / n; r < rows * (t + 1) / n; r++) {
+            const uint32_t z = r / by, y0 = (r % by) * 4;
+            const uint8_t* slice = rgba + (size_t)z * w * h * 4;
+            uint8_t* dst = out + (size_t)r * bx * 16;
+            for (uint32_t x = 0; x < bx; x++) {
+                for (uint32_t j = 0; j < 4; j++) {
+                    const uint32_t y = std::min(y0 + j, h - 1);
+                    for (uint32_t i = 0; i < 4; i++) {
+                        const uint32_t xx = std::min(x * 4 + i, w - 1);
+                        std::memcpy(blk + (j * 4 + i) * 4, slice + ((size_t)y * w + xx) * 4, 4);
+                    }
+                }
+                stb_compress_dxt_block(dst + (size_t)x * 16, blk, 1, STB_DXT_NORMAL);
+            }
+        }
+    };
+    texture_pool().parallel_for(n, part);
+    st_bc3_cpu_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+}
+uint32_t astc_cpu_threads() {
+    static const uint32_t threads = getenv("RX_VK_ASTC_THREADS")
+                                        ? (uint32_t)std::clamp(atoi(getenv("RX_VK_ASTC_THREADS")), 1, 32)
+                                        : std::clamp(std::thread::hardware_concurrency() / 2, 2u, 8u);   // (half the threads: the
+                                        // shader translation's workers and the game's own need the rest)
+    return threads;
+}
+void astc_decode_cpu(const uint8_t* blocks, uint64_t block_bytes, uint32_t w, uint32_t h, uint32_t d, uint32_t bw, uint32_t bh,
+                     uint8_t* out) {
+    const uint32_t threads = astc_cpu_threads();
+    const auto t0 = std::chrono::steady_clock::now();
+    struct Count {
+        std::chrono::steady_clock::time_point t0;
+        uint64_t texels;
+        ~Count() {
+            st_astc_cpu_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            st_astc_cpu_texels += (int64_t)texels;
+        }
+    } count{t0, (uint64_t)w * h * d};
+    if (astc_decode_arm(blocks, block_bytes, w, h, d, bw, bh, out, threads)) return;
+    const uint32_t rows = (h + bh - 1) / bh, cols = (w + bw - 1) / bw;
+    const uint64_t row_blocks = (uint64_t)cols * 16;   // (bytes of one row of blocks)
+    const uint32_t n = d == 1 && (uint64_t)w * h >= (256u << 10) ? std::min(threads, rows) : 1u;
+    if (n <= 1) {
+        Tegra::Texture::ASTC::DecompressSerial(std::span<const uint8_t>(blocks, block_bytes), w, h, d, bw, bh,
+                                               std::span<uint8_t>(out, (size_t)w * h * d * 4));
+        return;
+    }
+    const auto part = [&](uint32_t t) {
+        const uint32_t r0 = rows * t / n, r1 = rows * (t + 1) / n;
+        if (r0 >= r1) return;
+        const uint32_t y0 = r0 * bh, y1 = std::min(h, r1 * bh);
+        Tegra::Texture::ASTC::DecompressSerial(std::span<const uint8_t>(blocks + r0 * row_blocks, (uint64_t)(r1 - r0) * row_blocks),
+                                               w, y1 - y0, 1, bw, bh,
+                                               std::span<uint8_t>(out + (size_t)y0 * w * 4, (size_t)(y1 - y0) * w * 4));
+    };
+    std::vector<std::thread> pool;
+    pool.reserve(n - 1);
+    for (uint32_t t = 1; t < n; t++) pool.emplace_back(part, t);
+    part(0);
+    for (std::thread& t : pool) t.join();
+}
 bool astc_ready() {
     static int state = 0;   // 0 untried, 1 ready, -1 unavailable
     if (state) return state > 0;
     state = -1;
-    if (!dev.push_descriptor || !vkCmdPushDescriptorSetKHR || getenv("RX_VK_ASTC_CPU")) return false;
+    if (!dev.push_descriptor || !vkCmdPushDescriptorSetKHR || astc_on_cpu()) return false;
     const VkDescriptorSetLayoutBinding b[2] = {
         {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
@@ -649,6 +948,7 @@ void bc_encode_into(VkCommandBuffer cmd, uint32_t w, uint32_t h, uint32_t n, Tex
     vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bc_layout, 0, 2, wr);
     descriptors_disturbed();
     const BcPush pc{(w + 3) / 4, (h + 3) / 4, w, h, 1, 0};
+    checkpoint_note(cmd, dst.gpu, 'E', "#%u level %u layers %u+%u, %ux%u at %d,%d%s", dst.id, level, layer, n, w, h, dx, dy, from ? " (from the resized scratch)" : "");
     vkCmdPushConstants(cmd, bc_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
     vkCmdDispatch(cmd, (pc.blocks_x + 7) / 8, (pc.blocks_y + 7) / 8, n);
     full_barrier(cmd);
@@ -665,6 +965,7 @@ void bc_encode_resized(VkCommandBuffer cmd, uint32_t w, uint32_t h, uint32_t ow,
     bl.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, n};
     bl.srcOffsets[1] = {(int32_t)w, (int32_t)h, 1};
     bl.dstOffsets[1] = {(int32_t)ow, (int32_t)oh, 1};
+    checkpoint_note(cmd, dst.gpu, 'R', "#%u level %u layers %u+%u, %ux%u -> %ux%u", dst.id, level, layer, n, w, h, ow, oh);
     vkCmdBlitImage(cmd, bc_scratch, VK_IMAGE_LAYOUT_GENERAL, bc_scratch2, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
     bc_encode_into(cmd, ow, oh, n, dst, level, layer, 0, 0, bc_scratch2_view);
 }
@@ -927,6 +1228,9 @@ bool upload_astc_gpu(Texture& tex, uint64_t total, const Ranges* dirty) {
                 w[1].pImageInfo = &ii;
                 vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, astc_layout, 0, 2, w);
                 vkCmdPushConstants(cmd, astc_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+                checkpoint_note(cmd, tex.gpu, 'A', "#%u %ux%u x%u levels %u NVN %#x blocks %dx%d: level %u (%ux%u) layers %u+%u, %s, as BC3%s",
+                                tex.id, tex.width, tex.height, tex.layers, tex.levels, tex.nvn_format, (int)tex.block_w, (int)tex.block_h, level,
+                                g.w, g.h, layers[k0], n, direct ? "read in its pool" : "staged", tex.bc_resized ? " resized" : "");
                 vkCmdDispatch(cmd, (g.tw + 7) / 8, (g.th + 7) / 8, n);
                 if (tex.bc_resized)
                     bc_encode_resized(cmd, g.w, g.h, iw, ih, n, tex, level, layers[k0]);
@@ -935,6 +1239,7 @@ bool upload_astc_gpu(Texture& tex, uint64_t total, const Ranges* dirty) {
                 k0 = k1;
             }
         }
+        checkpoint_note(cmd, tex.gpu, 'Z', "#%u (ASTC as BC3)", tex.id);
         st_astc++;
         return true;
     }
@@ -964,9 +1269,13 @@ bool upload_astc_gpu(Texture& tex, uint64_t total, const Ranges* dirty) {
             w[1].pImageInfo = &ii;
             vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, astc_layout, 0, 2, w);
             vkCmdPushConstants(cmd, astc_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+            checkpoint_note(cmd, tex.gpu, 'A', "#%u %ux%u x%u levels %u NVN %#x blocks %dx%d: level %u (%ux%u) layers %u+%u, %s, as RGBA8",
+                            tex.id, tex.width, tex.height, tex.layers, tex.levels, tex.nvn_format, (int)tex.block_w, (int)tex.block_h, level,
+                            g.w, g.h, all ? 0u : layers[k], all ? tex.layers : 1u, direct ? "read in its pool" : "staged");
             vkCmdDispatch(cmd, (g.tw + 7) / 8, (g.th + 7) / 8, all ? tex.layers : 1);
         }
     }
+    checkpoint_note(cmd, tex.gpu, 'Z', "#%u (ASTC as RGBA8)", tex.id);
     st_astc++;
     return true;
 }
@@ -988,7 +1297,12 @@ bool unswizzle_ready() {
     if (state) return state > 0;
     state = -1;
     if (!dev.push_descriptor || !vkCmdPushDescriptorSetKHR) return false;
-    if (getenv("RX_VK_GPU_UNSWIZZLE") && !atoi(getenv("RX_VK_GPU_UNSWIZZLE"))) return false;
+    if (getenv("RX_VK_GPU_UNSWIZZLE") ? !atoi(getenv("RX_VK_GPU_UNSWIZZLE")) : amd_igpu()) {   // (igpu-fix: amd_igpu above)
+        static bool told;
+        if (!told && !getenv("RX_VK_GPU_UNSWIZZLE"))
+            told = true, logf("vk: an AMD integrated GPU: big textures unswizzled on the CPU (RX_VK_GPU_UNSWIZZLE=1: on the GPU)");
+        return false;
+    }
     const VkDescriptorSetLayoutBinding b[2] = {
         {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
@@ -1333,6 +1647,239 @@ bool upload_all_zero(Texture& tex, uint64_t total, const Ranges* dirty, bool wid
              tex.nvn_format, (unsigned long long)(total >> 20), ms);
     return true;
 }
+
+// ---- (igpu-fix) big ASTC textures decoded and encoded in the background ----
+// On a CPU that decodes the ASTC (astc_on_cpu: AMD integrated GPUs), a scene change's big textures held the replay for a
+// second or more each (Hyrule Field's terrain arrays, 1365 x 1365 x 90: 0.8 s of decode and BC3 encode), the game's
+// picture frozen meanwhile and its HUD drawn from records the game had moved on from (the minimap drawn as a heart for a
+// frame). Such a texture's blocks are now read and unswizzled where it is uploaded (guest memory as it is then), its image
+// filled with grey, and the decode and the BC3 encode done by a thread of their own; a later recording copies the texels in
+// (texture_async_install, as a recording begins). Until then the texture samples as opaque grey, a texture popping
+// in rather than the game stopping. A texture let go or uploaded again meanwhile cancels its job.
+// RX_VK_ASTC_ASYNC=0: as before, on the replay thread; RX_VK_ASTC_ASYNC_MIN_K=<thousands of texels> (default 1024): the
+// smallest texture, in texels over its levels and layers, decoded in the background
+}  // namespace (igpu-fix: the background job's types are the namespace's own, as Texture names AsyncTex)
+struct AsyncPart {
+    uint32_t level = 0, layer = 0, w = 0, h = 0;
+    std::vector<uint8_t> blocks;   // (the ASTC blocks, unswizzled)
+    uint64_t out_off = 0, out_bytes = 0;
+};
+struct AsyncTex {
+    Texture* tex = nullptr;
+    uint32_t id = 0;
+    bool bc = false;
+    uint32_t bw = 0, bh = 0;
+    std::vector<AsyncPart> parts;
+    std::vector<uint8_t> out;
+    std::atomic<bool> done{false}, cancelled{false};
+    std::chrono::steady_clock::time_point queued;
+};
+namespace {
+bool async_on() {
+    static const bool on = !getenv("RX_VK_ASTC_ASYNC") || atoi(getenv("RX_VK_ASTC_ASYNC")) != 0;
+    return on;
+}
+std::mutex async_mu;
+std::condition_variable async_cv;
+std::deque<std::shared_ptr<AsyncTex>> async_queue;   // (for the loader thread)
+std::vector<std::shared_ptr<AsyncTex>> async_pending; // (the replay's: queued or done, not yet copied in)
+std::atomic<int64_t> st_async_jobs{0}, st_async_installed{0}, st_async_cancelled{0}, st_async_ns{0}, st_async_wait_ns{0};
+void async_loader() {
+#ifdef _WIN32
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);   // (as the pool's: TexturePool::run)
+#endif
+    for (;;) {
+        std::shared_ptr<AsyncTex> j;
+        {
+            std::unique_lock lk(async_mu);
+            async_cv.wait(lk, [] { return !async_queue.empty(); });
+            j = std::move(async_queue.front());
+            async_queue.pop_front();
+        }
+        if (j->cancelled.load(std::memory_order_acquire)) {
+            j->done.store(true, std::memory_order_release);
+            continue;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<uint8_t> rgba;
+        for (AsyncPart& p : j->parts) {
+            if (j->cancelled.load(std::memory_order_relaxed)) break;
+            uint8_t* out = j->out.data() + p.out_off;
+            if (j->bc) {
+                rgba.resize((size_t)p.w * p.h * 4);
+                astc_decode_cpu(p.blocks.data(), p.blocks.size(), p.w, p.h, 1, j->bw, j->bh, rgba.data());
+                astc_bc3_cpu(rgba.data(), p.w, p.h, 1, out, astc_cpu_threads());
+            } else {
+                astc_decode_cpu(p.blocks.data(), p.blocks.size(), p.w, p.h, 1, j->bw, j->bh, out);
+            }
+            std::vector<uint8_t>().swap(p.blocks);
+        }
+        st_async_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        st_async_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t0 - j->queued).count();
+        j->done.store(true, std::memory_order_release);
+    }
+}
+VkBuffer async_fill[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};   // ([0] RGBA8 texels, [1] BC3 blocks: an opaque mid grey)
+constexpr uint64_t kAsyncZero = 16ull << 20;
+std::mutex async_pending_mu;   // (async_pending: the parallel replay's segments upload too)
+/// (the replay thread, from upload) true: the texture's decode was handed to the loader; false: decode it here
+bool upload_astc_async(Texture& tex, uint64_t total, const Ranges* dirty) {
+    if (!async_on() || !tex.astc || !astc_on_cpu() || tex.sparse || tex.type != VK_IMAGE_TYPE_2D || tex.skip ||
+        nvn_tex_is_linear(&tex.d) || (tex.bc && !astc_cpu_bc()) || tex.bpb != 16)
+        return false;
+    static const uint64_t min_texels = (uint64_t)(getenv("RX_VK_ASTC_ASYNC_MIN_K") ? std::max(1, atoi(getenv("RX_VK_ASTC_ASYNC_MIN_K"))) : 1024) << 10;
+    uint64_t texels = 0;
+    for (uint32_t level = 0; level < tex.levels; level++) {
+        const LevelGeo g = level_geo(tex, level);
+        texels += (uint64_t)g.w * g.h * tex.layers;
+    }
+    if (texels < min_texels) return false;
+    if (!async_fill[0]) {   // (what the images show till their texels come: an opaque mid grey, less of a hole than black)
+        for (int k = 0; k < 2; k++) {
+            VmaAllocation a = nullptr;
+            void* m = nullptr;
+            if (!create_buffer(kAsyncZero, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true, async_fill[k], a, &m) || !m) {
+                async_fill[0] = async_fill[1] = VK_NULL_HANDLE;
+                return false;
+            }
+            static const uint8_t texel[4] = {0x80, 0x80, 0x80, 0xFF};
+            static const uint8_t block[16] = {0xFF, 0xFF, 0, 0, 0, 0, 0, 0,   // (BC3: alpha 255 throughout)
+                                              0x10, 0x84, 0x10, 0x84, 0, 0, 0, 0};   // (colour 565 0x8410 throughout)
+            uint8_t* b = (uint8_t*)m;
+            for (uint64_t at = 0; at < kAsyncZero; at += k ? 16 : 4) std::memcpy(b + at, k ? block : texel, k ? 16 : 4);
+        }
+        std::thread(async_loader).detach();
+        logf("vk: big ASTC textures decoded in the background (RX_VK_ASTC_ASYNC=0: on the replay thread), from %llu K texels",
+             (unsigned long long)(min_texels >> 10));
+    }
+    if (tex.async) tex.async->cancelled.store(true), st_async_cancelled++;
+    auto j = std::make_shared<AsyncTex>();
+    j->tex = &tex, j->id = tex.id, j->bc = tex.bc, j->bw = (uint32_t)tex.block_w, j->bh = (uint32_t)tex.block_h;
+    std::vector<uint8_t> scratch;
+    std::vector<VkBufferImageCopy> zeros;
+    uint64_t out_total = 0;
+    for (uint32_t level = 0; level < tex.levels; level++) {
+        const LevelGeo g = level_geo(tex, level);
+        if (g.td != 1) return false;
+        for (uint32_t layer = 0; layer < tex.layers; layer++) {
+            const uint64_t src_off = g.offset + (uint64_t)layer * tex.L.layer_size;
+            if (src_off >= total) continue;
+            const uint64_t span = std::max<uint64_t>(g.swizzled, 1);
+            if (!overlaps(dirty, src_off, src_off + span)) continue;
+            AsyncPart p;
+            p.level = level, p.layer = layer, p.w = g.w, p.h = g.h;
+            p.blocks.resize((size_t)g.tw * g.th * 16);
+            const uint8_t* src;
+            if (total - src_off >= span) {
+                src = guest_bytes(tex.gpu + src_off, span, scratch);
+            } else {
+                scratch.assign(span, 0);
+                host->gpu_read(tex.gpu + src_off, scratch.data(), total - src_off);
+                src = scratch.data();
+            }
+            const auto u0 = std::chrono::steady_clock::now();
+            Tegra::Texture::UnswizzleTexture(std::span<uint8_t>(p.blocks.data(), p.blocks.size()), std::span<const uint8_t>(src, span),
+                                             16u, g.tw, g.th, 1, g.tile_h, g.tile_d, 1);
+            st_unswizzle_bytes += (int64_t)p.blocks.size();
+            st_unswizzle_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - u0).count();
+            p.out_bytes = tex.bc ? (uint64_t)((g.w + 3) / 4) * ((g.h + 3) / 4) * 16 : (uint64_t)g.w * g.h * 4;
+            p.out_off = out_total;
+            out_total += (p.out_bytes + 15) & ~15ull;
+            if (p.out_bytes <= kAsyncZero) {
+                VkBufferImageCopy c{};
+                c.bufferOffset = 0;
+                c.bufferRowLength = tex.bc ? (g.w + 3) / 4 * 4 : g.w;
+                c.bufferImageHeight = tex.bc ? (g.h + 3) / 4 * 4 : g.h;
+                c.imageSubresource = {tex.aspect, level, layer, 1};
+                c.imageExtent = {g.w, g.h, 1};
+                zeros.push_back(c);
+            }
+            j->parts.push_back(std::move(p));
+        }
+    }
+    if (j->parts.empty()) return false;
+    j->out.resize(out_total);
+    if (!zeros.empty()) {
+        checkpoint_mark(upload_cmd(), tex.gpu, 'u');
+        vkCmdCopyBufferToImage(upload_cmd(), async_fill[tex.bc ? 1 : 0], tex.image, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)zeros.size(),
+                               zeros.data());
+    }
+    j->queued = std::chrono::steady_clock::now();
+    tex.async = j;
+    {
+        std::lock_guard pk(async_pending_mu);
+        async_pending.push_back(j);
+    }
+    {
+        std::lock_guard lk(async_mu);
+        async_queue.push_back(j);
+    }
+    async_cv.notify_one();
+    st_async_jobs++;
+    st_bytes += (int64_t)out_total;
+    return true;
+}
+/// (the replay thread, as a recording begins) the textures whose decode is done copied in, in its uploads
+void texture_async_install() {
+    std::lock_guard pk(async_pending_mu);
+    if (async_pending.empty()) return;
+    static const uint64_t per_recording = 256ull << 20;   // (at most this much copied in a recording: the rest waits a recording)
+    uint64_t copied = 0;
+    for (auto it = async_pending.begin(); it != async_pending.end();) {
+        AsyncTex& j = **it;
+        if (j.cancelled.load(std::memory_order_acquire)) {
+            if (j.done.load(std::memory_order_acquire)) it = async_pending.erase(it);
+            else ++it;
+            continue;
+        }
+        if (!j.done.load(std::memory_order_acquire) || copied >= per_recording) {
+            ++it;
+            continue;
+        }
+        Texture& tex = *j.tex;
+        std::vector<VkBufferImageCopy> copies;
+        VkBuffer buffer = VK_NULL_HANDLE;
+        bool ok = true;
+        for (const AsyncPart& p : j.parts) {
+            const Staging st = staging((p.out_bytes + 15) & ~15ull, 16);
+            if (!st.buffer) {
+                ok = false;
+                break;
+            }
+            if (buffer && st.buffer != buffer && !copies.empty()) {
+                vkCmdCopyBufferToImage(upload_cmd(), buffer, tex.image, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)copies.size(), copies.data());
+                copies.clear();
+            }
+            buffer = st.buffer;
+            std::memcpy(st.data, j.out.data() + p.out_off, p.out_bytes);
+            VkBufferImageCopy c{};
+            c.bufferOffset = st.offset;
+            c.bufferRowLength = j.bc ? (p.w + 3) / 4 * 4 : p.w;
+            c.bufferImageHeight = j.bc ? (p.h + 3) / 4 * 4 : p.h;
+            c.imageSubresource = {tex.aspect, p.level, p.layer, 1};
+            c.imageExtent = {p.w, p.h, 1};
+            copies.push_back(c);
+        }
+        if (ok && !copies.empty()) {
+            checkpoint_mark(upload_cmd(), tex.gpu, 'u');
+            vkCmdCopyBufferToImage(upload_cmd(), buffer, tex.image, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)copies.size(), copies.data());
+        }
+        tex.last_value = std::max(tex.last_value, rec_value);
+        copied += j.out.size();
+        st_async_installed++;
+        tex.async.reset();
+        it = async_pending.erase(it);
+    }
+    static uint64_t logged_at;
+    if (frame_no >= logged_at + 600 && st_async_jobs.load()) {
+        logged_at = frame_no;
+        const int64_t n = st_async_installed.load();
+        logf("vk: background ASTC: %lld textures queued, %lld copied in, %lld cancelled, %zu pending; %.0f ms of decode each, "
+             "%.0f ms waiting in the queue each", (long long)st_async_jobs.load(), (long long)n, (long long)st_async_cancelled.load(),
+             async_pending.size(), n ? st_async_ns.load() / 1e6 / n : 0.0, n ? st_async_wait_ns.load() / 1e6 / n : 0.0);
+    }
+}
+
 bool upload(Texture& tex, const Ranges* dirty) {
     PROF(PROF_UPLOAD);
     if (!tex.gpu || tex.samples != VK_SAMPLE_COUNT_1_BIT) return false;
@@ -1357,14 +1904,22 @@ bool upload(Texture& tex, const Ranges* dirty) {
                  (unsigned long long)tex.first_seen);
         }
     }
-    if (tex.astc && upload_astc_gpu(tex, total, dirty)) return true;
-    if (tex.bc) return false;   // (no CPU path into BC3)
+    // (relink) the ocarina's note buttons: the CPU's ASTC decode, where their blocks are at hand to be replaced
+    // (ocarina_tex.h), while the prompts' family is not the game's own
+    const bool ocarina = ocarina_tex_shape(tex) && ocarina_tex_state() != 0;
+    if (tex.astc && !ocarina && upload_astc_gpu(tex, total, dirty)) return true;
+    if (tex.bc && !astc_cpu_bc()) return false;   // (no CPU path into BC3 but for the CPU-decoded ASTC, igpu-fix)
+    if (tex.async) {   // (igpu-fix: uploaded again before its background decode was copied in: all of it again)
+        tex.async->cancelled.store(true), tex.async.reset(), st_async_cancelled++;
+        dirty = nullptr;
+    }
+    if (upload_astc_async(tex, total, dirty)) return true;
     // (the GPU's unswizzle reads guest memory as it is: not where the capture kept the storage as it was at its submit)
     if (!(tex.gpu < (1ull << 40) && memory_has_shadow(tex.gpu, total)) && upload_unswizzle_gpu(tex, total, dirty)) return true;
     const bool linear = nvn_tex_is_linear(&tex.d);
     int widen_from = 0;
     widened(tex.d.format ? vk_format(tex.nvn_format).format : tex.format, &widen_from);
-    if (upload_all_zero(tex, total, dirty, widen_from != 0)) return true;
+    if (!tex.bc && upload_all_zero(tex, total, dirty, widen_from != 0)) return true;
     const int src_bpb = tex.bpb;
     const int out_bpb = tex.astc ? 4 : widen_from ? (widen_from == 3 ? 4 : widen_from == 6 ? 8 : 16) : src_bpb;
     const uint32_t copy_layers = tex.type == VK_IMAGE_TYPE_3D ? 1 : tex.layers;
@@ -1412,7 +1967,8 @@ bool upload(Texture& tex, const Ranges* dirty) {
                 const uint32_t th = std::min(g.th - y0, nrow * rows_per);   // (blocks)
                 const uint64_t block_bytes = (uint64_t)g.tw * th * g.td * src_bpb;
                 const uint32_t px_h = std::min(g.h - y0 * (uint32_t)tex.block_h, th * (uint32_t)tex.block_h);
-                const uint64_t out_bytes = tex.astc ? (uint64_t)g.w * px_h * g.d * 4 : (uint64_t)g.tw * th * g.td * out_bpb;
+                const uint64_t out_bytes = tex.bc     ? (uint64_t)((g.w + 3) / 4) * ((px_h + 3) / 4) * g.d * 16
+                                           : tex.astc ? (uint64_t)g.w * px_h * g.d * 4 : (uint64_t)g.tw * th * g.td * out_bpb;
                 const Staging st = staging((out_bytes + 15) & ~15ull, 16);
                 if (!st.buffer) return false;
                 if (buffer && st.buffer != buffer && !copies.empty()) {   // (a new arena: copy what the last one holds)
@@ -1507,10 +2063,16 @@ bool upload(Texture& tex, const Ranges* dirty) {
                 }
                 if (keytex && y0 == 0 && th == g.th && block_bytes == prompt_tex::kBlocks)
                     tex.keytex_wait = prompt_tex_apply(blocks) < 0;
-                if (tex.astc) {
-                    Tegra::Texture::ASTC::DecompressSerial(std::span<const uint8_t>(blocks, block_bytes), g.w, px_h, g.d,
-                                                           (u32)tex.block_w, (u32)tex.block_h,
-                                                           std::span<uint8_t>(out, (size_t)g.w * px_h * g.d * 4));
+                if (ocarina && y0 == 0 && th == g.th && block_bytes == ocarina_tex::kBlocks)
+                    tex.keytex_wait = ocarina_tex_apply(blocks) < 0;
+                if (tex.astc && tex.bc) {   // (igpu-fix: decoded, then encoded as BC3 into the staging)
+                    static thread_local std::vector<uint8_t> rgba;
+                    rgba.resize((size_t)g.w * px_h * g.d * 4);
+                    astc_decode_cpu(blocks, block_bytes, g.w, px_h, g.d, (uint32_t)tex.block_w, (uint32_t)tex.block_h, rgba.data());
+                    astc_bc3_cpu(rgba.data(), g.w, px_h, g.d, out, astc_cpu_threads());
+                    if (rgba.capacity() > (64u << 20)) std::vector<uint8_t>().swap(rgba);
+                } else if (tex.astc) {
+                    astc_decode_cpu(blocks, block_bytes, g.w, px_h, g.d, (uint32_t)tex.block_w, (uint32_t)tex.block_h, out);
                 } else if (widen_from) {
                     widen_rows(out, blocks, (size_t)g.tw * th * g.td, src_bpb, out_bpb);
                 }
@@ -1564,8 +2126,8 @@ bool upload(Texture& tex, const Ranges* dirty) {
                 }
                 VkBufferImageCopy c{};
                 c.bufferOffset = st.offset;
-                c.bufferRowLength = tex.astc ? g.w : g.tw * tex.block_w;
-                c.bufferImageHeight = tex.astc ? px_h : th * tex.block_h;
+                c.bufferRowLength = tex.bc ? (g.w + 3) / 4 * 4 : tex.astc ? g.w : g.tw * tex.block_w;
+                c.bufferImageHeight = tex.bc ? (px_h + 3) / 4 * 4 : tex.astc ? px_h : th * tex.block_h;
                 c.imageSubresource = {aspect, level, tex.type == VK_IMAGE_TYPE_3D ? 0 : layer, 1};
                 c.imageOffset = {0, (int32_t)(y0 * (uint32_t)tex.block_h), 0};
                 c.imageExtent = {g.w, px_h, g.d};
@@ -1774,6 +2336,7 @@ uint64_t destroy_gen = 1;   // (bumped when textures go: what was resolved to th
 
 void destroy_later(Texture& tex) {
     destroy_gen++;
+    if (tex.async) tex.async->cancelled.store(true), tex.async.reset(), st_async_cancelled++;   // (igpu-fix: its decode dropped)
     Dead d{tex.last_value, tex.image, tex.allocation, {}, {}};
     for (auto& kv : tex.views)
         if (kv.second) d.views.push_back(kv.second);
@@ -1833,7 +2396,7 @@ std::unordered_map<uint64_t, Parked> parked;   // (evicted_key -> its texels)
 uint64_t parked_bytes = 0;
 std::atomic<int64_t> st_parked{0}, st_restored{0}, st_park_dropped{0}, st_park_stale{0};
 uint64_t park_cap() {
-    static const uint64_t cap = [] {
+    static const uint64_t cap = []() -> uint64_t {
         if (const char* e = getenv("RX_VK_PARK_MB")) return (uint64_t)std::max(0, atoi(e)) << 20;
         uint64_t ram = 0;
 #ifdef _WIN32
@@ -2156,7 +2719,7 @@ Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw
                     logf("vk: texture %#llx %ux%u x%u, %u levels: uneven BC block levels on AMD, kept as RGBA8 (%d so far)",
                          (unsigned long long)t->gpu, x.width, x.height, x.layers, x.levels, n_rgba8);
             }
-        } else if (bc_candidate && bc_ready()) {
+        } else if (bc_candidate && (bc_ready() || (astc_cpu_bc() && !x.sparse))) {   // (igpu-fix: or encoded on the CPU)
             x.bc = true;
             x.format = VK_FORMAT_BC3_UNORM_BLOCK;
         }
@@ -2418,6 +2981,12 @@ bool prompt_tex_shape(const Texture& t) {
            !t.bc && t.bpb == 8 && t.block_w == 4 && t.block_h == 4;
 }
 
+bool ocarina_tex_shape(const Texture& t) {
+    return t.astc && t.type == VK_IMAGE_TYPE_2D && t.width == ocarina_tex::kSize && t.height == ocarina_tex::kSize &&
+           t.depth == 1 && t.levels == 1 && t.layers == 1 && !t.skip && !t.sparse && !t.bc && t.block_w == 4 &&
+           t.block_h == 4;
+}
+
 std::atomic<uint64_t> work_epoch{0};
 namespace {
 // (each thread's own: the display thread's present records barriers too)
@@ -2505,6 +3074,7 @@ void texture_begin_recording(VkCommandBuffer upload, uint64_t value) {
     up_used = false;
     memory_table_begin();
     memory_rb_recording_begun();   // (which readback pages its uploads may refresh: memory_rb_refresh)
+    texture_async_install();   // (igpu-fix: the background decodes done, copied in)
 }
 VkCommandBuffer upload_command_buffer() {
     return upload_cmd();
@@ -2683,8 +3253,9 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
         tex->upload_gen = gen;
         return tex;
     }
-    if (tex->keytex_wait && !tex->gpu_written) {   // (relink: a HUD cross letter uploaded before its family was known: prompt_tex.h)
-        const int s = prompt_tex_state();
+    if (tex->keytex_wait && !tex->gpu_written) {   // (relink: a HUD cross letter or an ocarina note uploaded before its
+                                                   // family was known: prompt_tex.h, ocarina_tex.h)
+        const int s = ocarina_tex_shape(*tex) ? ocarina_tex_state() : prompt_tex_state();
         if (s >= 0) {
             tex->keytex_wait = false;
             if (s > 0) {   // (uploaded again, whole: replaced now)
@@ -2832,6 +3403,7 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
         }
     }
     const auto up0 = std::chrono::steady_clock::now();
+    const int64_t astc_ns0 = st_astc_cpu_ns.load(), unsw_ns0 = st_unswizzle_ns, bc_ns0 = st_bc3_cpu_ns.load();
     const bool up_ok = upload(*tex, partial || sparse_written ? &dirty : nullptr);
     {   // (an upload over 15 ms: what it was, 60 of them)
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - up0).count();
@@ -2844,6 +3416,8 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
                  tex->nvn_format, tex->astc ? " ASTC" : "", tex->bc ? " (BC3)" : "",
                  (unsigned long long)((partial ? part : tex->guest_size) >> 10), (unsigned long long)(tex->guest_size >> 10),
                  tex->uploaded ? " again" : "");
+            logf("vk:   of which ASTC decode on the CPU %.1f ms, BC3 encode on the CPU %.1f ms, unswizzle on the CPU %.1f ms",
+                 (st_astc_cpu_ns.load() - astc_ns0) / 1e6, (st_bc3_cpu_ns.load() - bc_ns0) / 1e6, (st_unswizzle_ns - unsw_ns0) / 1e6);
         }
     }
     if (up_ok) {
@@ -3210,6 +3784,10 @@ bool flush_texture(Texture& t, uint64_t clip_lo, uint64_t clip_hi) {
         return false;
     bool ok = readback_begin();
     if (ok) {
+        {   // (igpu-fix, diagnostic) a read-back is a submission of its own between the recordings: marked (RX_VK_CHECKPOINTS)
+            checkpoint_note(rb_cmd, t.gpu, 'K', "#%u %ux%u x%u levels %u, %llu KB: VERY FIRST command", t.id, t.width, t.height,
+                            t.layers, t.levels, (unsigned long long)(total >> 10));
+        }
         full_barrier(rb_cmd);   // (after what the submissions before wrote)
         std::vector<VkBufferImageCopy> c;
         for (const Part& p : parts) {
@@ -3221,8 +3799,11 @@ bool flush_texture(Texture& t, uint64_t clip_lo, uint64_t clip_hi) {
             r.imageExtent = {p.g.w, p.g.h, p.g.d};
             c.push_back(r);
         }
+        checkpoint_note(rb_cmd, t.gpu, 'K', "#%u: before the copy into host memory", t.id);
         vkCmdCopyImageToBuffer(rb_cmd, t.image, VK_IMAGE_LAYOUT_GENERAL, buf, (uint32_t)c.size(), c.data());
+        checkpoint_note(rb_cmd, t.gpu, 'K', "#%u: END, after the copy", t.id);
         ok = readback_submit_wait();
+        if (!ok) logf("vk: READBACK of texture #%u FAILED or timed out (5 s)", t.id);
         if (ok && !uncached) invalidate_mapped(alloc, total);
     }
     if (ok && total <= 64) {   // (RX_VK_LOG_TINY_FLUSH=1: the values of tiny ones, 400 lines: a 1 x 1 luminance)
@@ -4153,8 +4734,15 @@ void texture_frame(uint64_t completed) {
     {   // (relink) an integrated GPU's "VRAM" is the system's RAM, which the game's own ~10 GB also needs: 70% of what the driver allows
         // was 5.3 GB of textures on a 16 GB laptop with a Radeon 780M, and the PC ran out of memory in Hyrule Field within minutes
         // (Discord, 2026-11-09). At most 2.5 GB there unless RX_VK_VRAM_MB says otherwise
+        // (igpu-fix) Not where the GPU has 4 GB or more of memory set aside for it alone (8 GB on a ROG Xbox Ally X): 2.5 GB was
+        // far under what a scene there draws (4.5 GB of textures in use with the ASTC decoded on the CPU), and textures still in
+        // use were let go and made again every few frames: black patches, wrong textures for a frame, 4 fps, then the device lost
         static bool told;
-        if (!getenv("RX_VK_VRAM_MB") && dev.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && own > (2560ull << 20)) {
+        const uint64_t dedicated = igpu_dedicated_bytes();
+        if (!getenv("RX_VK_VRAM_MB") && dev.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && dedicated >= (4096ull << 20)) {
+            if (!told) told = true, logf("vk: an integrated GPU with %llu MB of its own: textures up to %llu MB (RX_VK_VRAM_MB=<MB>: other)",
+                                         (unsigned long long)(dedicated >> 20), (unsigned long long)(own >> 20));
+        } else if (!getenv("RX_VK_VRAM_MB") && dev.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && own > (2560ull << 20)) {
             own = 2560ull << 20;
             if (!told) told = true, logf("vk: an integrated GPU shares the system's RAM: textures at most 2560 MB (RX_VK_VRAM_MB=<MB>: other)");
         }

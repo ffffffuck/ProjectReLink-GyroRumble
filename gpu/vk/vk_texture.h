@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
+#include <memory>
 
 #include "vk_internal.h"
 
@@ -95,6 +96,9 @@ struct Texture {
         std::vector<VkImageView> views;   // (one a layer, a 3D image's slice, made as they are used)
     };
     std::vector<StandIn> stand_ins;
+    // (igpu-fix) a background decode of its ASTC under way (vk_texture.cpp upload_astc_async): its texels come in a few
+    // frames later; the image reads zero till then
+    std::shared_ptr<struct AsyncTex> async;
 };
 
 /// Makes texels [x, x + w) x [y, y + h) of level `level`, layers [first, first + count), of a sparse texture resident
@@ -220,5 +224,8 @@ void texture_read_texels(const nvn_tex* t, unsigned level, unsigned layer0, cons
 /// (relink) A texture of the HUD cross letters' shape (prompt_tex.h): BC4 UNORM, 2D, 64 x 64, one level, one layer. Only
 /// those have their blocks hashed at upload
 bool prompt_tex_shape(const Texture& t);
+/// (relink) A texture of the ocarina's note buttons' shape (ocarina_tex.h): ASTC 4x4, 2D, 93 x 93, one level, one layer.
+/// Those take the CPU's ASTC decode while the prompts' family is not the game's own, and have their blocks hashed there
+bool ocarina_tex_shape(const Texture& t);
 
 } // namespace mkwvk

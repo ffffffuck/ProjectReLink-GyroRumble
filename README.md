@@ -96,7 +96,8 @@ the game. We have none of them here, so that part is not tested by us.
 
 The mouse turns the camera after a click in the game's window (Escape frees it). The Insert menu's **Mouse camera** row
 chooses how: as the right stick, or "Native", one to one as in a PC game. If the game has no sound, the same menu's
-**Audio output** row (Gameplay) can be set to Stereo; it applies after a restart.
+**Audio output** row (Gameplay) can be set to Stereo; it applies after a restart. The **Volume** row just above it sets the
+game's whole sound, music, effects and voices, from 0% (muted) to 100%, heard at once and kept in relink_options.ini.
 
 **Item wheel** (Gameplay, off by default): holding R or L shows the item row as a wheel, Twilight Princess style. Point at an
 item with either stick (or the mouse) and let go: it is on ZR at once. The items are on pages of 8 slots, one set for child
@@ -143,9 +144,11 @@ shows the button that presses it, so the letters follow the **Layout preset** an
 preset, the Switch's A is the right-hand button and shows Xbox's B. The labels are ReLink's own drawings, which every build
 adds to a copy of your game's button font in the `prompts` folder. The three faded letters around the HUD's action
 button, which are pictures and not letters of the font, follow too: the renderer puts ReLink's own labels in their place
-(`prompts\keytex.bin`, made by every build). It applies the next time the game starts. Not changed yet: the ocarina's
-note buttons, pictures as well, keep the Switch's; and the font has one colour, so the prompts are not coloured. A mod
-that replaces the button font wins over this row, and the faded letters then stay the Switch's too.
+(`prompts\keytex.bin`, made by every build), and so do the ocarina's note buttons (A, B, X, Y, L and R, pictures as well:
+`prompts\ocarina.bin`, made by every build from your game's own six, with the Switch's letter taken out and ReLink's label
+drawn in its place). It applies the next time the game starts. The font has one colour, so the prompts are not coloured.
+A mod that replaces the button font wins over this row, and the faded letters and the ocarina's notes then stay the
+Switch's too.
 `HOS_BUTTON_PROMPTS=0`, `xbox` or `playstation` in `relink_env.txt` stands in for it.
 
 ## Measured frame rates
@@ -350,8 +353,8 @@ pages, Y déplace un objet. **Cycle items** change l'objet de ZR d'un appui bref
 **Button prompts** (onglet Controls du menu Insert) : les boutons affichés par le jeu sont ceux d'une manette Xbox ou
 PlayStation, dessinés par ReLink, et suivent le **Layout preset** et vos propres assignations ; le réglage s'applique au
 prochain démarrage du jeu. Les trois lettres pâles autour du bouton d'action du HUD, qui sont des images, suivent aussi
-(ReLink met ses propres dessins à leur place, `prompts\keytex.bin`). Les notes de l'ocarina, des images elles aussi,
-gardent les lettres de la Switch, et la police n'a qu'une couleur.
+(ReLink met ses propres dessins à leur place, `prompts\keytex.bin`), de même que les boutons des notes de l'ocarina (des
+images elles aussi, `prompts\ocarina.bin`) ; la police n'a qu'une couleur.
 
 **Depuis la 0.7.9** : **30, smooth** (lanceur, onglet Smoothness, Frames per second) garde chaque image à l'écran le même
 temps sur les PC qui ne tiennent pas 60 ; **Field of view** (menu Insert, Graphics, 70 à 150 %) règle l'angle de la caméra et

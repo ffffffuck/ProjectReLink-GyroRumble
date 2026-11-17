@@ -38,6 +38,7 @@
 #include "oot_cheat_items.h"   // (relink: OOT_CHEAT_ITEM_BASE, OOT_CHEAT_AGE_ID: the item wheel's counts and pages)
 #include "oot_wheel_state.h"   // (relink: the Item wheel and Cycle items rows' option ids)
 #include "oot_teleport_capture.h"   // (relink: HOS_OPT_TELEPORT_PICTURES)
+#include "hos_volume.h"   // (relink: HOS_OPT_VOLUME)
 #include "vk_jobs.h"
 #include "vk_shader.h"
 #include "vk_state.h"
@@ -71,8 +72,9 @@ uint64_t rec_seq = 0;                       // (the recordings submitted so far;
 std::vector<uint64_t> rec_open_values;      // (the submissions finished in the recording being made; replay_mu)
 std::mutex rec_map_mu;
 std::map<uint64_t, uint64_t> value_rec;     // submission value (or a recording's own) -> the recording that finished it
-std::unordered_map<uint64_t, uint64_t> q_last;   // queue -> its last submission's value (sync_order_mu)
-std::map<uint64_t, uint64_t> value_queue;   // a submission's value -> its queue (sync_order_mu)
+std::mutex q_map_mu;                         // protects q_last + value_queue (acquired alone or inside sync_order_mu / submit_order_mu)
+std::unordered_map<uint64_t, uint64_t> q_last;   // queue -> its last submission's value (q_map_mu)
+std::map<uint64_t, uint64_t> value_queue;   // a submission's value -> its queue (q_map_mu)
 std::atomic<uint64_t> pushed{0};
 std::atomic<uint64_t> q_values{0};   // the fence values handed out (a submit or a present takes one each)
 std::mutex replay_mu;   // one replay at a time (the game submits from several threads)
@@ -619,6 +621,8 @@ Recording& begin_recording(uint64_t value) {
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(r.cmd, &bi);
     vkBeginCommandBuffer(r.upload, &bi);
+    checkpoint_note(r.upload, value, 'S', "its uploads, VERY FIRST command (before anything else in it)");
+    checkpoint_note(r.cmd, value, 'S', "its draws, VERY FIRST command (before its timestamp reset)");
     gpu_time_begin(r);
     gprof_begin_recording(r.slot, r.cmd, r.upload);
     r.value = value;
@@ -628,6 +632,7 @@ Recording& begin_recording(uint64_t value) {
     memory_recording_value(value, completed());
     texture_begin_recording(r.upload, value);
     texture_prefetch_some();   // (relink: a few textures made ahead of their first draw, into this recording's uploads)
+    checkpoint_note(r.cmd, value, 'S', "its draws and dispatches");
     draw_begin_recording(r.slot, r.cmd, value);
     return r;
 }
@@ -635,6 +640,8 @@ void submit_recording(Recording& r, bool signal_value = true, uint64_t signal_at
     const bool uploads = texture_uploads_recorded();
     gprof_submitted(r.slot, uploads);
     gpu_time_end(r);
+    if (uploads) checkpoint_note(r.upload, r.value, 'F', "its uploads");
+    checkpoint_note(r.cmd, r.value, 'F', "its draws and dispatches");
     vkEndCommandBuffer(r.upload);
     vkEndCommandBuffer(r.cmd);
     VkSemaphoreSubmitInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
@@ -1183,12 +1190,14 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
                 const uint64_t guest = host->gpu_guest(c.dst);
                 if (guest) memory_stamp_gpu(guest, c.size);
             } else {   // (outside the pools: on the CPU)
+                bool wrote = false;
                 for (uint64_t done = 0; done < c.size;) {
                     uint8_t buf[65536];
                     const uint64_t k = std::min<uint64_t>(sizeof buf, c.size - done);
                     if (!host->gpu_read(c.src + done, buf, k) || !host->gpu_write(c.dst + done, buf, k)) break;
-                    done += k;
+                    done += k, wrote = true;
                 }
+                if (wrote) ub_gen++;
             }
             full_barrier(cmd);
             break;
@@ -1203,7 +1212,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             if (in_stream && !worker) {
                 uint32_t words[64];
                 for (auto& w : words) w = c0.value;
-                host->gpu_write(c0.dst, words, c0.size);
+                if (host->gpu_write(c0.dst, words, c0.size)) ub_gen++;
             }
             if (dry) break;
             ParLock lk;
@@ -1230,11 +1239,13 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             } else if (!in_stream) {   // (outside the pools or unaligned: on the CPU)
                 uint32_t buf[1024];
                 for (auto& w : buf) w = c.value;
+                bool wrote = false;
                 for (uint64_t done = 0; done < c.size;) {
                     const uint64_t k = std::min<uint64_t>(sizeof buf, c.size - done);
                     if (!host->gpu_write(c.dst + done, buf, k)) break;
-                    done += k;
+                    done += k, wrote = true;
                 }
+                if (wrote) ub_gen++;
             }
             full_barrier(cmd);
             break;
@@ -2345,6 +2356,7 @@ bool run_submit(const uint64_t* handles, int n, uint64_t value, uint64_t queue, 
     if (burst_open && rec_cur) {   // (the burst's recording goes on: what the piece before did, done first)
         end_pass(rec_cur->cmd);
         full_barrier(rec_cur->cmd, "barrier (a burst's next submit start)");
+        ub_gen++;   // direct guest ranges may have been rewritten between the burst's guest submits
         use_queue_state(queue);
     } else {
         const uint64_t tag = burst_open ? std::max(burst_value, value) : value;
@@ -2475,7 +2487,14 @@ bool sync_waits_on() {
     static const bool v = !getenv("RX_VK_SYNC_WAITS") || atoi(getenv("RX_VK_SYNC_WAITS")) != 0;
     return v && event_waits_on() && !async_on() && !dump_on();
 }
+bool defer_main_replay_on() {
+    static const bool v = getenv("RX_VK_DEFER_MAIN_REPLAY") && atoi(getenv("RX_VK_DEFER_MAIN_REPLAY")) != 0;
+    return v;
+}
+void drain_deferred_submits(uint64_t up_to_value = UINT64_MAX);
+bool defer_behind();
 void sync_drain(int why) {
+    if (defer_main_replay_on()) drain_deferred_submits();
     if (!blocked_n.load()) return;
     std::lock_guard lk(sync_order_mu);
     drain(why);
@@ -2483,6 +2502,7 @@ void sync_drain(int why) {
 }
 /// (relink) The stopped queues whose waits are met go on; none is forced past its wait
 void sync_settle() {
+    if (defer_main_replay_on()) drain_deferred_submits();
     if (!blocked_n.load()) return;
     std::lock_guard lk(sync_order_mu);
     burst_begin(0);
@@ -2555,11 +2575,13 @@ uint64_t fence();
 uint64_t fence_q(uint64_t queue) {
     if (async_on() || !sync_waits_on() || per_queue_fences_off() || !queue) return fence();
     std::lock_guard lk(sync_order_mu);
+    std::lock_guard qk(q_map_mu);
     auto it = q_last.find(queue);
     return it != q_last.end() ? it->second : fence();
 }
 int wait(uint64_t f, uint64_t timeout_ns) {
     if (completed() >= f) return 1;
+    if (!async_on() && sync_waits_on() && defer_main_replay_on()) drain_deferred_submits(f);
     queue_flush_for(FR_WAIT);
     // (relink) a fence of one queue whose work up to it is recorded whole (none of it stopped): that work, not the other
     // queues' stopped work the timeline above waits for (which a wait for it forced past its waits after RX_VK_WAIT_HOLD_US)
@@ -2567,9 +2589,15 @@ int wait(uint64_t f, uint64_t timeout_ns) {
         bool mine = false;
         {
             std::lock_guard lk(sync_order_mu);
-            auto it = value_queue.find(f);
-            if (it != value_queue.end()) {
-                auto q = qruns.find(it->second);
+            uint64_t qid = 0;
+            bool have_q = false;
+            {
+                std::lock_guard qk(q_map_mu);
+                auto it = value_queue.find(f);
+                if (it != value_queue.end()) qid = it->second, have_q = true;
+            }
+            if (have_q) {
+                auto q = qruns.find(qid);
                 mine = q == qruns.end() || !q->second.blocked() || q->second.oldest() > f;
             }
         }
@@ -3518,7 +3546,13 @@ void do_present(const nvn_tex* t, const int crop[4]) {
         {   // (RX_VK_WAIT_GPU=<frames>: the replay no further ahead of the GPU than that; =0: each
             // present waits for its own frame's GPU work, against one-frame flashes from the CPU rewriting data a pass has yet to
             // read. Not by default here (relink): measured first, it cost up to 10 fps on Windows)
-            static const int ahead = getenv("RX_VK_WAIT_GPU") ? atoi(getenv("RX_VK_WAIT_GPU")) : -1;
+            // (igpu-fix) =0 by default on AMD integrated GPUs: the GPU reads guest memory where it is, and a Radeon 890M ran far
+            // enough behind that the game had rewritten its HUD's records by the time a pass read them: icons flashing in the middle
+            // of the screen and the minimap drawn with another texture whenever the camera moved, gone with the wait (48-56 fps)
+            static const int ahead = getenv("RX_VK_WAIT_GPU") ? atoi(getenv("RX_VK_WAIT_GPU"))
+                                     : amd_igpu()
+                                         ? (logf("vk: an AMD integrated GPU: each present waits for its frame's GPU work (RX_VK_WAIT_GPU=-1: not)"), 0)
+                                         : -1;
             if (ahead == 0) wait_value(value);
             static uint64_t values[8];
             if (ahead > 0) {
@@ -3941,6 +3975,8 @@ static bool present_one(VkImage src, uint32_t sw, uint32_t sh, const int crop[4]
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(f.cmd, &bi);
     VkImage dst = dev.swap_images[index];
+    checkpoint_note(f.cmd, (uint64_t)presents, 'P', "start: swapchain image %u of %ux%u, source image %p %ux%u, view %p", index,
+                    dev.swap_extent.width, dev.swap_extent.height, (void*)src, sw, sh, (void*)view);
     full_barrier(f.cmd);   // (after the game's work for the frame: earlier submits on this queue)
     image_barrier(f.cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     const bool preserve_stretch = host && host->aspect_ratio && host->aspect_ratio() > 1.0f;
@@ -3953,6 +3989,8 @@ static bool present_one(VkImage src, uint32_t sw, uint32_t sh, const int crop[4]
         // The following blit overlaps the clear in the content rectangle.
         image_barrier(f.cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     }
+    checkpoint_note(f.cmd, (uint64_t)presents, 'P', "before the picture's blit or scaling (bars %d, rect %d,%d %ux%u)", has_bars ? 1 : 0,
+                    (int)rect.x, (int)rect.y, (unsigned)rect.w, (unsigned)rect.h);
     if (const VkImage scaled = src && view ? framegen_scale(f.cmd, view, src, sw, sh, crop, rect.w, rect.h) : VK_NULL_HANDLE) {
         blit_crop_to_rect(f.cmd, scaled, rect.w, rect.h, nullptr, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, rect);
     } else if (src) {
@@ -3962,6 +4000,7 @@ static bool present_one(VkImage src, uint32_t sw, uint32_t sh, const int crop[4]
         const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         vkCmdClearColorImage(f.cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
     }
+    checkpoint_note(f.cmd, (uint64_t)presents, 'P', "after the picture's blit, before the frame log's copy (%s)", src && framelog_on() ? "on" : "off");
     if (first_of_frame && src && framelog_on()) {
         static uint32_t seq;
         LogSlot& l = log_slots[log_slot];
@@ -3972,8 +4011,11 @@ static bool present_one(VkImage src, uint32_t sw, uint32_t sh, const int crop[4]
         vkCmdCopyImageToBuffer(f.cmd, log_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, l.buf, 1, &c);
         l.used = true, l.at = prof_now(), l.seq = seq++, l.kind = present_kind.load();
     }
+    checkpoint_note(f.cmd, (uint64_t)presents, 'P', "before the menu and overlay");
     menu_record(f.cmd, dst, log_slot, dev.swap_extent.width, dev.swap_extent.height);
+    checkpoint_note(f.cmd, (uint64_t)presents, 'P', "after the menu and overlay, before the swapchain image's last barrier");
     image_barrier(f.cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    checkpoint_note(f.cmd, (uint64_t)presents, 'P', "END of the present's command buffer");
     vkEndCommandBuffer(f.cmd);
     // after the image's acquisition. (Not on the timeline: one queue runs submits in order, and a wait for a value
     // another thread had counted but not yet submitted blocked the queue for good)
@@ -4021,7 +4063,7 @@ static bool present_one(VkImage src, uint32_t sw, uint32_t sh, const int crop[4]
     // ~15% to submit. With a queue of their own (dev.present_queue, a compute family's: vk_main.cpp create_device) the presents go
     // out with the submits' lock let go: the blit above signals swap_rendered on the replay's queue (submitted already, as a binary
     // semaphore's wait needs). (Waiting for the blit's fence before the present, with the lock let go, was worse.)
-    if (dev.present_queue) {
+    if (dev.present_queue && !reflex_use_main_queue()) {
         qk.unlock();
         std::lock_guard pq(dev.present_queue_mu);
         res = vkQueuePresentKHR(dev.present_queue, &pi);
@@ -4294,6 +4336,7 @@ void enqueue(Job&& j) {
 
 void wait_queue_empty() {
     if (!async_on()) {
+        if (defer_main_replay_on()) drain_deferred_submits();
         // A catch-up (a queue finish, a CPU read back of what the GPU wrote, a pool remapped) used to force every queue
         // stopped at an event wait past it. The work those waits are for is mostly not submitted yet (the waiting thread is the one
         // that submits it), so the stopped submission went on without it and its lit passes read what that work makes before it
@@ -4320,14 +4363,113 @@ void wait_queue_empty() {
 }
 /// (work handed to the replay thread and not yet recorded)
 bool replay_behind() {
-    if (!async_on()) return blocked_n.load() > 0;
+    if (!async_on()) return (defer_main_replay_on() && defer_behind()) || blocked_n.load() > 0;
     std::lock_guard lk(q_mu);
     return !q_jobs.empty() || q_busy || blocked_n.load() > 0;
 }
 
 std::mutex submit_order_mu;   // (captures and submits queued in the same order)
+struct DeferredSubmit {
+    std::vector<uint64_t> handles;
+    uint64_t value = 0, queue = 0, ticket = 0;
+};
+std::mutex defer_mu;
+std::condition_variable defer_cv, defer_done_cv;
+std::deque<DeferredSubmit> defer_jobs;
+uint64_t defer_next_ticket = 0, defer_served_ticket = 0;
+uint64_t defer_served_max_value = 0;
+
+bool defer_behind() {
+    std::lock_guard lk(defer_mu);
+    return defer_served_ticket < defer_next_ticket;
+}
+void drain_deferred_submits(uint64_t up_to_value) {
+    uint64_t target = 0;
+    {
+        std::lock_guard lk(defer_mu);
+        if (defer_served_ticket >= defer_next_ticket) return;
+        if (up_to_value != UINT64_MAX && defer_served_max_value >= up_to_value) return;
+        target = defer_next_ticket;
+    }
+    std::unique_lock lk(defer_mu);
+    defer_done_cv.wait(lk, [target] { return defer_served_ticket >= target; });
+}
+void defer_worker_main() {
+    SetThreadDescription(GetCurrentThread(), L"mkw_vk main-sub");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    for (;;) {
+        DeferredSubmit j;
+        {
+            std::unique_lock lk(defer_mu);
+            defer_cv.wait(lk, [] { return !defer_jobs.empty() && defer_served_ticket == defer_jobs.front().ticket; });
+            j = std::move(defer_jobs.front());
+            defer_jobs.pop_front();
+        }
+        {
+            std::lock_guard order(sync_order_mu);
+            submit_job(j.handles, j.value, j.queue);
+            update_blocked();
+        }
+        {
+            std::lock_guard lk(defer_mu);
+            if (j.value > defer_served_max_value) defer_served_max_value = j.value;
+            defer_served_ticket++;
+        }
+        defer_cv.notify_one();
+        defer_done_cv.notify_all();
+    }
+}
+
 void submit_q(const uint64_t* handles, int n, uint64_t queue) {
     if (!async_on()) {
+        if (sync_waits_on() && defer_main_replay_on()) {
+            static std::once_flag watch, dwork;
+            std::call_once(watch, [] { std::thread(sync_watch).detach(); });
+            std::call_once(dwork, [] {
+                std::thread(defer_worker_main).detach();
+                logf("vk: non-presenting thread submits captured synchronously, replayed off Chain A (RX_VK_DEFER_MAIN_REPLAY=1)");
+            });
+            static const bool capture = !getenv("RX_VK_SYNC_CAPTURE") || atoi(getenv("RX_VK_SYNC_CAPTURE")) != 0;
+            std::vector<uint64_t> h(handles, handles + std::max(n, 0));
+            const DWORD ptid = present_tid.load(std::memory_order_relaxed);
+            const bool is_non_present = ptid != 0 && GetCurrentThreadId() != ptid;
+            uint64_t value = 0, ticket = 0;
+            {
+                std::lock_guard sl(submit_order_mu);
+                if (capture) memory_capture_submit();   // synchronous on game caller thread: exact FIFO match with ticket
+                value = ++q_values;
+                if (queue) {
+                    std::lock_guard qk(q_map_mu);
+                    q_last[queue] = value;
+                    value_queue[value] = queue;
+                    while (value_queue.size() > 8192) value_queue.erase(value_queue.begin());
+                }
+                std::lock_guard dl(defer_mu);
+                ticket = defer_next_ticket++;
+                if (is_non_present) {
+                    defer_jobs.push_back({std::move(h), value, queue, ticket});
+                    defer_cv.notify_one();
+                    return;
+                }
+            }
+            {
+                std::unique_lock dl(defer_mu);
+                defer_done_cv.wait(dl, [ticket] { return defer_served_ticket == ticket; });
+            }
+            {
+                std::lock_guard order(sync_order_mu);
+                submit_job(h, value, queue);
+                update_blocked();
+            }
+            {
+                std::lock_guard dl(defer_mu);
+                if (value > defer_served_max_value) defer_served_max_value = value;
+                defer_served_ticket++;
+            }
+            defer_cv.notify_one();
+            defer_done_cv.notify_all();
+            return;
+        }
         std::lock_guard order(sync_order_mu);
         // (the replay here is on the submitting thread, but the game's other threads go on writing their next frames: a pool
         // synced from guest memory later in the frame read those. The capture is taken here too)
@@ -4350,6 +4492,7 @@ void submit_q(const uint64_t* handles, int n, uint64_t queue) {
             std::vector<uint64_t> h(handles, handles + std::max(n, 0));
             const uint64_t value = ++q_values;
             if (queue) {
+                std::lock_guard qk(q_map_mu);
                 q_last[queue] = value;
                 value_queue[value] = queue;
                 while (value_queue.size() > 8192) value_queue.erase(value_queue.begin());
@@ -4374,6 +4517,7 @@ void present(const nvn_tex* t, const int crop[4]) {
     present_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
     value_at_present.store(value_begun.load(std::memory_order_relaxed), std::memory_order_relaxed);   // (vk_present_value)
     if (!async_on()) {
+        if (defer_main_replay_on()) drain_deferred_submits();
         std::lock_guard order(sync_order_mu);
         if (sync_waits_on()) {
             drain(0);   // (the frame's work whole before it is shown)
@@ -4597,6 +4741,7 @@ void fill_replay_table(MkwVkRenderer& t) {
         if (id == HOS_OPT_TELEPORT_PICTURES) return menu_teleport_captures_on();   // (relink: host/hos_main.c oot_capture_tick)
         if (id == HOS_OPT_LOW_CAP_MFPS) return low_cap_repeats() > 1 ? low_cap_mfps.load(std::memory_order_relaxed) : 0;
         if (id == HOS_OPT_FOV) return opts.fov;   // (relink: host/nn_vi.c, nx2/oot_fov.py)
+        if (id == HOS_OPT_VOLUME) return opts.volume;   // (relink: host/nn_audio.c)
         if (id == HOS_OPT_PRESENTS_SHOWN) return presents_shown.load(std::memory_order_acquire) & 0x3fffffff;   // (relink: host/nn_vi.c)
         return id == 0 ? opts.realtime : id == 1 ? menu_is_open() : id == 2 ? resolution_auto() && !dlss_full_scale() : id == 3 ? (dlss_full_scale() ? 10000 : resolution_scale()) : id == 4 ? opts.pad_background : id == 5 ? opts.text_speed : id == 6 ? opts.mouse_native :
                id == 7 ? opts.mouse_sens : id == 8 ? opts.mouse_invert : id == 9 ? opts.rumble : id == HOS_OPT_DEADZONE_L ? opts.deadzone_l : id == HOS_OPT_DEADZONE_R ? opts.deadzone_r : id == 16 ? opts.invert_cam_x : id == 17 ? opts.invert_cam_y : id == HOS_OPT_GYRO ? opts.gyro : id == HOS_OPT_GYRO_SENS_X ? opts.gyro_sens_x : id == HOS_OPT_GYRO_SENS_Y ? opts.gyro_sens_y : id == HOS_OPT_GYRO_INV_X ? opts.gyro_inv_x : id == HOS_OPT_GYRO_INV_Y ? opts.gyro_inv_y :

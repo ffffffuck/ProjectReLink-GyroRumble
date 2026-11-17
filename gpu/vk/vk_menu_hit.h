@@ -53,8 +53,10 @@ inline void to_image(int x, int y, int win_w, int win_h, int img_w, int img_h, i
 }
 /// The menu's top left in the window's image: centred, as menu_record copies it
 inline void origin(int img_w, int img_h, int menu_w, int menu_h, int* x0, int* y0) {
-    *x0 = (img_w - menu_w) / 2;
-    *y0 = (img_h - menu_h) / 2;
+    // (relink, issue 96) centred when it fits; a menu taller (or wider) than the window starts at its top (left) edge and the
+    // rest is cut off: a 1280x720 window held a 726-line menu, which was then not drawn at all
+    *x0 = img_w >= menu_w ? (img_w - menu_w) / 2 : 0;
+    *y0 = img_h >= menu_h ? (img_h - menu_h) / 2 : 0;
 }
 inline int rows_top(int s) { return (kTabY + kTabH + kRowGap) * s; }
 inline int tab_slot_w(int s, int w) { return (w - 2 * kTabSide * s) / 3; }

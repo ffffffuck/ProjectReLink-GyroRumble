@@ -1,6 +1,7 @@
 /* Guest memory map: the system region (our own objects), the heap, address regions.
    The whole 4 GB window is committed up front (hos_main.c), so "mapping" here is only bookkeeping and zeroing. */
 #include "hos.h"
+#include "hos_mapped_pages.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -223,12 +224,53 @@ uint64_t hos_region_release_gaps(uint64_t lo, uint64_t hi) {
 #endif
 }
 
+/* (Longshot #324, report-only BC-250 A/B) Horizon accounts pages mapped
+   outside the heap against the application's total. Without that count OoT
+   always sees nearly the whole 9809 MiB as free and grows its resource caches
+   beside the 6894 MiB heap. Keep the count in both arms so a same-binary A/B
+   differs only in the values reported to the game. */
+static HosMappedPages mapped_pages;
+static uint64_t mapped_peak, mapped_logged;
+
+static int meminfo_mapped_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *value = getenv("HOS_MEMINFO_MAPPED");
+        on = value && value[0] && value[0] != '0';
+    }
+    return on;
+}
+
+static void mapped_pages_report_locked(void) {
+    if (mapped_pages.bytes > mapped_peak) mapped_peak = mapped_pages.bytes;
+    const uint64_t step = 256ULL << 20;
+    if (mapped_pages.bytes / step != mapped_logged / step) {
+        mapped_logged = mapped_pages.bytes;
+        hos_log("mem: the game's mapped pages %llu MB (peak %llu); heap %llu MB; the console's total %llu MB",
+                (unsigned long long)(mapped_pages.bytes >> 20), (unsigned long long)(mapped_peak >> 20),
+                (unsigned long long)(hos_heap_size >> 20), (unsigned long long)(hos_total_memory >> 20));
+    }
+}
+
+uint64_t hos_reported_used_memory(uint64_t base, int legacy_heap) {
+    if (!meminfo_mapped_on()) return base + (legacy_heap ? hos_heap_size : 0);
+    LOCK();
+    const uint64_t extra = hos_heap_size + mapped_pages.bytes;
+    UNLOCK();
+    if (base >= hos_total_memory || extra >= hos_total_memory - base) return hos_total_memory;
+    return base + extra;
+}
+
 void hos_region_free(uint64_t addr) {
     uint64_t freed = 0, freed_size = 0;
     LOCK();
     for (int i = 0; i < nregions; i++) {
         if (regions[i].addr == addr) {
             pages_mark_used_locked(regions[i].addr, regions[i].size);
+            /* OoT normally frees a region without FreeMemoryPages first. Clear
+               its whole span; already-unmapped pages make this idempotent. */
+            hos_mapped_pages_set(&mapped_pages, regions[i].addr, regions[i].size, 0);
+            mapped_pages_report_locked();
             freed = regions[i].addr;
             freed_size = regions[i].size;
             memmove(&regions[i], &regions[i + 1], (nregions - i - 1) * sizeof(Range));
@@ -334,6 +376,10 @@ HLE(_ZN2nn2os17FreeAddressRegionEm) {
 HLE(_ZN2nn2os19AllocateMemoryPagesEmm) {
     HOS_TRACE_CALL("AllocateMemoryPages");
     const uint64_t a = ARG(0), n = ARG(1), end = a + n;
+    LOCK();
+    hos_mapped_pages_set(&mapped_pages, a, n, 1);
+    mapped_pages_report_locked();
+    UNLOCK();
     static int zero_all = -1;
     if (zero_all < 0) zero_all = getenv("HOS_ZERO_ALL_PAGES") != NULL;
     if (end > (1ULL << 32) && !zero_all) {
@@ -376,6 +422,12 @@ HLE(_ZN2nn2os19AllocateMemoryPagesEmm) {
 /* nn::os::FreeMemoryPages(unsigned long, unsigned long) -> Result */
 HLE(_ZN2nn2os15FreeMemoryPagesEmm) {
     HOS_TRACE_CALL("FreeMemoryPages");
+    /* This precedes the address-region path's early return: every successful
+       AllocateMemoryPages report is removed by either free path. */
+    LOCK();
+    hos_mapped_pages_set(&mapped_pages, ARG(0), ARG(1), 0);
+    mapped_pages_report_locked();
+    UNLOCK();
     if (ARG(0) + ARG(1) > (1ULL << 32)) {   /* (mkw-recomp: the pair of AllocateMemoryPages' commit above) */
         const uint64_t lo = (ARG(0) + 0xFFF) & ~0xFFFULL, hi = (ARG(0) + ARG(1)) & ~0xFFFULL;
         /* (pages the Vulkan back end imported, as part of a pool's 16 MB chunk, stay committed and are zeroed: the GPU
@@ -408,7 +460,10 @@ HLE(_ZN2nn2os15QueryMemoryInfoEPNS0_10MemoryInfoE) {
     uint64_t info = ARG(0);
     HOS_TRACE_CALL("QueryMemoryInfo");
     G64(info + 0x00) = hos_total_memory;                       /* total available */
-    G64(info + 0x08) = hos_program_size + (16ULL << 20);       /* total used: program + system */
+    /* HOS_MEMINFO_MAPPED=1: program + system + heap + mapped pages, capped so
+       the game's total-used subtraction cannot wrap. Unset keeps this site's
+       old answer (program + system, without the heap) exactly. */
+    G64(info + 0x08) = hos_reported_used_memory(hos_program_size + (16ULL << 20), 0);
     G64(info + 0x10) = hos_heap_size;                          /* total heap */
     G64(info + 0x18) = hos_heap_used;                          /* allocated heap */
     G64(info + 0x20) = hos_program_size;                       /* program */

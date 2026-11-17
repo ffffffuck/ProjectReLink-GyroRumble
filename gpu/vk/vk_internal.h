@@ -91,6 +91,9 @@ struct BufferRef {
     VkBuffer buffer = VK_NULL_HANDLE;
     uint64_t offset = 0, size = 0;
     VkDeviceAddress address = 0;
+    // The binding aliases CPU-writable guest memory. Unlike a VRAM mirror, its
+    // bytes can change after command recording and before the GPU reads them.
+    bool direct = false;
     explicit operator bool() const {
         return buffer != VK_NULL_HANDLE;
     }
@@ -132,6 +135,11 @@ void coopmat_init();   // vk_coopmat.cpp (once the device is made)
 /// A marker of another kind of GPU work (m: mirror sync, b: write-back, u: texture upload, g: GPU unswizzle; key: its
 /// pool or texture), RX_VK_CHECKPOINTS
 void checkpoint_mark(VkCommandBuffer cmd, uint64_t key, char kind);
+/// (igpu-fix) the same with a line of text for the report (A: ASTC decode, E: BC3 encode, R: resize blit, Z: a texture's uploads ended)
+void checkpoint_note(VkCommandBuffer cmd, uint64_t key, char kind, const char* fmt, ...);
+/// (igpu-fix) an AMD integrated GPU with AMD's own Windows driver: where the CPU decodes the ASTC and each present waits for
+/// its frame's GPU work by default (vk_texture.cpp)
+bool amd_igpu();
 
 /// Parallel replay (vk_replay.cpp, RX_VK_PARALLEL): while segments of a submission are recorded on several threads,
 /// what they share (textures and their uploads, programs, pipelines, samplers, pools and memory stamps) is used under

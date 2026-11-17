@@ -52,6 +52,9 @@ extern const char hos_main_build_id[];                 /* (gen/hos_image.c: main
    hos_thread.c) run only when the lifted main is Mario Kart World's: any other game has other code there */
 int hos_game_is_mkw(void);
 #define HOS_GAME_TITLE "Project ReLink"
+/* Used-memory answers with HOS_MEMINFO_MAPPED=1 include the heap and pages
+   mapped through AllocateMemoryPages; legacy_heap preserves each old answer. */
+uint64_t hos_reported_used_memory(uint64_t base, int legacy_heap);
 void hos_commit(uint64_t addr, uint64_t size);         /* (mkw_glue.c) guest pages made usable by host APIs */
 #if defined(A64_WRITE_TRACK) && !defined(__EMSCRIPTEN__)
 void hos_mark_written(const void *p, size_t n);   /* (hos_mem.c: guest memory written by host code, native soft watch) */
