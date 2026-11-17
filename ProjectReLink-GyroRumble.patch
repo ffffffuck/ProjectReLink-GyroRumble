@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 95b414b..97c014b 100644
+index 95b414b..18c3f96 100644
 --- a/README.md
 +++ b/README.md
 @@ -8,13 +8,18 @@ remake) into a native Windows game: the game's code is translated to PC code and
@@ -50,7 +50,7 @@ index 95b414b..97c014b 100644
  3. Choisissez votre copie du jeu : le lanceur cherche les `.nup` dans Téléchargements, Bureau et Documents ; vous pouvez aussi
     en choisir un, le déposer sur la fenêtre, ou donner les dossiers `romfs` et `exefs`.
 diff --git a/gpu/vk/vk_api.h b/gpu/vk/vk_api.h
-index 6f326ca..dc69952 100644
+index 6f326ca..7b1f72e 100644
 --- a/gpu/vk/vk_api.h
 +++ b/gpu/vk/vk_api.h
 @@ -19,7 +19,7 @@ extern "C" {
@@ -96,7 +96,7 @@ index 66f4b65..7bab192 100644
       "Which face button is which. Binding one yourself on the Controls page makes it Custom.", hn_pad_layout},
      {TAB_CONTROLS, "Button prompts", &opts.button_prompts, 0, 2, 1, tx_button_prompts,   // (relink: host/prompts.c)
 diff --git a/gpu/vk/vk_menu.h b/gpu/vk/vk_menu.h
-index d476e3a..090af9c 100644
+index d476e3a..773c0cb 100644
 --- a/gpu/vk/vk_menu.h
 +++ b/gpu/vk/vk_menu.h
 @@ -57,6 +57,7 @@ struct Options {
@@ -121,7 +121,7 @@ index 103e45d..72a4e1d 100644
      };
 diff --git a/host/hd_rumble.h b/host/hd_rumble.h
 new file mode 100644
-index 0000000..f984f2d
+index 0000000..c88de5b
 --- /dev/null
 +++ b/host/hd_rumble.h
 @@ -0,0 +1,150 @@
@@ -276,7 +276,7 @@ index 0000000..f984f2d
 +}
 +static inline int hd_rumble_after_send(int ok) { return ok ? HD_RUMBLE_ON : HD_RUMBLE_OFF; }
 diff --git a/host/hos_motion.h b/host/hos_motion.h
-index 7b6f3fe..143e740 100644
+index 7b6f3fe..382f21f 100644
 --- a/host/hos_motion.h
 +++ b/host/hos_motion.h
 @@ -1,22 +1,27 @@
@@ -663,7 +663,7 @@ index 7b6f3fe..143e740 100644
      return 1;
  }
 diff --git a/host/hos_sdl.c b/host/hos_sdl.c
-index 90897ae..ecea9c4 100644
+index 90897ae..7dac537 100644
 --- a/host/hos_sdl.c
 +++ b/host/hos_sdl.c
 @@ -20,6 +20,7 @@ static struct {
@@ -699,7 +699,7 @@ index 90897ae..ecea9c4 100644
  int hos_sdl_pad_has_sensor(void *pad, int type) {
      if (!f.PadHasSensor || !f.PadSensorEnable || !f.PadSensorData) return 0;
 diff --git a/host/hos_sdl.h b/host/hos_sdl.h
-index e64379c..bc1d2f6 100644
+index e64379c..c748f21 100644
 --- a/host/hos_sdl.h
 +++ b/host/hos_sdl.h
 @@ -73,6 +73,9 @@ int16_t hos_sdl_pad_axis(void *pad, int axis);
@@ -713,7 +713,7 @@ index e64379c..bc1d2f6 100644
  enum { HOS_SDL_SENSOR_ACCEL = 1, HOS_SDL_SENSOR_GYRO = 2 };
  int hos_sdl_pad_has_sensor(void *pad, int type);
 diff --git a/host/hos_update.c b/host/hos_update.c
-index 3eb970d..0eca2d0 100644
+index 3eb970d..f9c5c8e 100644
 --- a/host/hos_update.c
 +++ b/host/hos_update.c
 @@ -13,8 +13,8 @@
@@ -750,7 +750,7 @@ index 3eb970d..0eca2d0 100644
          }
          return;
 diff --git a/host/nn_hid.c b/host/nn_hid.c
-index d6fd95f..ba879f1 100644
+index d6fd95f..2a1f362 100644
 --- a/host/nn_hid.c
 +++ b/host/nn_hid.c
 @@ -938,7 +938,7 @@ HLE(_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_2
@@ -783,7 +783,7 @@ index d6fd95f..ba879f1 100644
  }
  static void vibration_value_idle(uint64_t v) {   /* VibrationValue {f32 amp_low, freq_low, amp_high, freq_high} */
 diff --git a/host/pad_sdl.c b/host/pad_sdl.c
-index 77ea6c7..c0f5e98 100644
+index 77ea6c7..7ee6c21 100644
 --- a/host/pad_sdl.c
 +++ b/host/pad_sdl.c
 @@ -20,6 +20,7 @@
@@ -960,7 +960,7 @@ index 61dc7dc..796c4f2 100644
    </PropertyGroup>
  
 diff --git a/launcher/Texts.cs b/launcher/Texts.cs
-index 8ebbe48..83085e3 100644
+index 8ebbe48..0db1a33 100644
 --- a/launcher/Texts.cs
 +++ b/launcher/Texts.cs
 @@ -23,8 +23,8 @@ static class Texts
@@ -974,8 +974,96 @@ index 8ebbe48..83085e3 100644
      public const string RepoPage = "https://github.com/" + Repo;
      public const string ReleasesPage = RepoPage + "/releases/latest";
      public const string HelpPage = RepoPage + "#readme";
+diff --git a/launcher/Updater.cs b/launcher/Updater.cs
+index 39ae532..5a46a51 100644
+--- a/launcher/Updater.cs
++++ b/launcher/Updater.cs
+@@ -74,6 +74,23 @@ static class Updater
+         return null;
+     }
+ 
++    /// The release's setup list is a small direct download and names its own tag. Resolve the setup from that tag instead
++    /// of asking the unauthenticated GitHub API for release metadata (which is limited to 60 requests an hour per IP).
++    static async Task<(string Tag, string SetupUrl)> LatestSetup(MainWindow w, HttpClient http, CancellationToken token)
++    {
++        using var response = await GetWithRetries(w, http, RepoPage + "/releases/latest/download/" + SetupList, token,
++            timeout: TimeSpan.FromSeconds(30));
++        var list = await response.Content.ReadAsStringAsync(token);
++        foreach (var line in list.Split('\n'))
++        {
++            if (!line.StartsWith("tag ", StringComparison.Ordinal)) continue;
++            var tag = line[4..].Trim();
++            if (tag.Length > 0)
++                return (tag, RepoPage + "/releases/download/" + Uri.EscapeDataString(tag) + "/" + SetupAsset);
++        }
++        throw new InvalidOperationException(L("La liste de mise à jour de GitHub n'a pas de version.", "GitHub's update list has no version."));
++    }
++
+     /// The latest release's setup downloaded and started with args: it installs the new launcher (only the parts that changed) and
+     /// starts it with the same args; this one closes.
+     public static async Task RunLatestSetup(MainWindow w, IEnumerable<string> args)
+@@ -81,23 +98,12 @@ static class Updater
+         var token = w.DownloadToken;
+         using var http = Client(Timeout.InfiniteTimeSpan);
+         w.Note(L("Recherche de la dernière version sur GitHub", "Asking GitHub for the latest release"));
+-        string? setupUrl = null, setupApiUrl = null;
+-        long setupSize = 0;
+-        using (var response = await GetWithRetries(w, http, Latest, token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
+-        using (var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token)))
+-            foreach (var asset in doc.RootElement.GetProperty("assets").EnumerateArray())
+-                if (asset.GetProperty("name").GetString() == SetupAsset)
+-                {
+-                    setupUrl = asset.GetProperty("browser_download_url").GetString();
+-                    setupApiUrl = asset.GetProperty("url").GetString();
+-                    setupSize = asset.GetProperty("size").GetInt64();
+-                }
+-        if (setupUrl == null) throw new InvalidOperationException(L($"La dernière version n'a pas de {SetupAsset}.", $"The latest release has no {SetupAsset}."));
++        var latest = await LatestSetup(w, http, token);
+         var cache = Path.Combine(Storage.Base, "update");
+         Directory.CreateDirectory(cache);
+         var setup = Path.Combine(cache, SetupAsset);
+         w.Note(L("Téléchargement du nouveau ReLink", "Downloading the new ReLink"));
+-        await DownloadWithRetries(w, http, setupUrl, setupApiUrl, setup, setupSize, token);
++        await DownloadWithRetries(w, http, latest.SetupUrl, null, setup, 0, token);
+         var si = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = cache };
+         foreach (var arg in args) si.ArgumentList.Add(arg);
+         Process.Start(si);
+@@ -134,22 +140,8 @@ static class Updater
+             var token = w.DownloadToken;
+             using var http = Client(Timeout.InfiniteTimeSpan);
+             w.Note(L("Recherche de la dernière version sur GitHub", "Asking GitHub for the latest release"));
+-            string? newTag = null, setupUrl = null, setupApiUrl = null;
+-            long setupSize = 0;
+-            using (var response = await GetWithRetries(w, http, Latest, token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
+-            using (var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token)))
+-            {
+-                newTag = doc.RootElement.GetProperty("tag_name").GetString();
+-                foreach (var asset in doc.RootElement.GetProperty("assets").EnumerateArray())
+-                    if (asset.GetProperty("name").GetString() == SetupAsset)
+-                    {
+-                        setupUrl = asset.GetProperty("browser_download_url").GetString();
+-                        setupApiUrl = asset.GetProperty("url").GetString();
+-                        setupSize = asset.GetProperty("size").GetInt64();
+-                    }
+-            }
+-            if (newTag == null || setupUrl == null)
+-                throw new InvalidOperationException(L($"La dernière version n'a pas de {SetupAsset}.", $"The latest release has no {SetupAsset}."));
++            var latest = await LatestSetup(w, http, token);
++            var newTag = latest.Tag;
+             if (newTag == tools.Version)
+             {
+                 w.UpdateBuild(tools, folder);
+@@ -159,7 +151,7 @@ static class Updater
+             Directory.CreateDirectory(cache);
+             w.Note(L($"Téléchargement de la mise à jour {newTag}", $"Downloading the update for {newTag}"));
+             var setup = Path.Combine(cache, SetupAsset);
+-            await DownloadWithRetries(w, http, setupUrl, setupApiUrl, setup, setupSize, token, w.DownloadProgress);
++            await DownloadWithRetries(w, http, latest.SetupUrl, null, setup, 0, token, w.DownloadProgress);
+             var si = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = cache };
+             foreach (var arg in new[] { "--update", folder, "--tag", newTag, "--fetched" }) si.ArgumentList.Add(arg);
+             Process.Start(si);
 diff --git a/launcher/setup/setup.c b/launcher/setup/setup.c
-index d08c6fa..1cd7806 100644
+index d08c6fa..ce4f848 100644
 --- a/launcher/setup/setup.c
 +++ b/launcher/setup/setup.c
 @@ -432,8 +432,8 @@ static const char *manifest_url(void) {
@@ -999,7 +1087,7 @@ index d08c6fa..1cd7806 100644
                                 L"This is on GitHub's side: try again in a few minutes, or later today."
                               : L"Could not reach GitHub to get ReLink. Check your internet connection and try again.");
 diff --git a/recomplauncher.json b/recomplauncher.json
-index d034e01..003bd85 100644
+index d034e01..f1d2d25 100644
 --- a/recomplauncher.json
 +++ b/recomplauncher.json
 @@ -1,8 +1,8 @@
@@ -1014,7 +1102,7 @@ index d034e01..003bd85 100644
      "kind": "iso_or_folder",
      "label": "Your copy of The Legend of Zelda: Ocarina of Time for Nintendo Switch 2, with its update installed (program 0400486024DEC000, update v131072, build e0f3ccfa): its .nup file, or a folder holding its exefs and romfs folders. Other versions do not work.",
 diff --git a/scripts/make_seed.py b/scripts/make_seed.py
-index 1b4c8aa..b7a184f 100644
+index 1b4c8aa..a34fb53 100644
 --- a/scripts/make_seed.py
 +++ b/scripts/make_seed.py
 @@ -83,7 +83,7 @@ def main():
@@ -1027,7 +1115,7 @@ index 1b4c8aa..b7a184f 100644
      if not os.path.isfile(os.path.join(a.python, "python.exe")):
          sys.exit("%s: no python.exe" % a.python)
 diff --git a/scripts/make_setup_parts.py b/scripts/make_setup_parts.py
-index 3718640..e848e98 100644
+index 3718640..6eb557a 100644
 --- a/scripts/make_setup_parts.py
 +++ b/scripts/make_setup_parts.py
 @@ -73,7 +73,7 @@ def main():
