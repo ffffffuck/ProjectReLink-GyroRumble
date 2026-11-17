@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 95b414b..97c014b 100644
+index 95b414b..18c3f96 100644
 --- a/README.md
 +++ b/README.md
 @@ -8,13 +8,18 @@ remake) into a native Windows game: the game's code is translated to PC code and
@@ -50,7 +50,7 @@ index 95b414b..97c014b 100644
  3. Choisissez votre copie du jeu : le lanceur cherche les `.nup` dans Téléchargements, Bureau et Documents ; vous pouvez aussi
     en choisir un, le déposer sur la fenêtre, ou donner les dossiers `romfs` et `exefs`.
 diff --git a/gpu/vk/vk_api.h b/gpu/vk/vk_api.h
-index 6f326ca..dc69952 100644
+index 6f326ca..7b1f72e 100644
 --- a/gpu/vk/vk_api.h
 +++ b/gpu/vk/vk_api.h
 @@ -19,7 +19,7 @@ extern "C" {
@@ -96,7 +96,7 @@ index 66f4b65..7bab192 100644
       "Which face button is which. Binding one yourself on the Controls page makes it Custom.", hn_pad_layout},
      {TAB_CONTROLS, "Button prompts", &opts.button_prompts, 0, 2, 1, tx_button_prompts,   // (relink: host/prompts.c)
 diff --git a/gpu/vk/vk_menu.h b/gpu/vk/vk_menu.h
-index d476e3a..090af9c 100644
+index d476e3a..773c0cb 100644
 --- a/gpu/vk/vk_menu.h
 +++ b/gpu/vk/vk_menu.h
 @@ -57,6 +57,7 @@ struct Options {
@@ -119,164 +119,8 @@ index 103e45d..72a4e1d 100644
                 id == HOS_OPT_DLSS_JITTER_W || id == HOS_OPT_DLSS_JITTER_H ? (int)dlss_jitter_size(id - HOS_OPT_DLSS_JITTER_W) :
                 id == HOS_OPT_DLSS_JITTER_PHASES ? (int)dlss_jitter_size(2) : 0;
      };
-diff --git a/host/hd_rumble.h b/host/hd_rumble.h
-new file mode 100644
-index 0000000..f984f2d
---- /dev/null
-+++ b/host/hd_rumble.h
-@@ -0,0 +1,150 @@
-+/* HD rumble for Nintendo Switch Pro Controllers and Joy-Cons, through SDL's effect call (host/pad_sdl.c).
-+
-+   The game's vibration values (nn::hid VibrationValue: {amp_low, freq_low, amp_high, freq_high}, amplitudes 0 to 1,
-+   frequencies in Hz, one per side of the controller) are what the Switch sends its controllers, so a Switch controller
-+   can play them, both bands at their own frequency and on their own side, instead of two motor strengths.
-+   SDL's Switch driver (src/joystick/hidapi/SDL_hidapi_switch.c, SDL 3.2 on: HIDAPI_DriverSwitch_SendJoystickEffect)
-+   takes a whole rumble output report, 0x10, packet number, then 4 bytes per side, and writes it in place of its own
-+   rumble. SDL2's own driver and the other SDL drivers (Switch 2 controllers, the kernel's hid-nintendo, joysticks
-+   SDL combined, such as a Joy-Con pair) refuse it: those pads keep the motor path.
-+
-+   The encoding is the one documented by the community's reverse engineering (Switchbrew's HID "Rumble data" page;
-+   dekuNukem's Nintendo_Switch_Reverse_Engineering rumble_data_table.md, written from its formulas and tables):
-+   - a frequency's code is round(log2(Hz / 10) * 32); the high band takes code - 0x60 times 4 (0x004 to 0x1FC, 9 bits:
-+     81.75 to 1252.57 Hz), the low band code - 0x40 (0x01 to 0x7F: 40.88 to 626.29 Hz);
-+   - an amplitude's code, 0 to 100 (0 to 1.003), is round(log2(8.7 a) * 32) from 32 up, round(log2(17 a) * 16) from 16
-+     to 31, and below that the table's 2^(1/4) steps (a = 2^(code / 4) / 119.6, code 1 = 0.0078); the high band takes
-+     code * 2, the low band code / 2 + 0x40 with the code's odd bit as its 9th bit (0x8000). Codes over 100 are past what
-+     the table calls safe for the actuators: 100 is the top, as SDL's own table stops there;
-+   - the 4 bytes of a side: high frequency's low 8 bits; high amplitude | the high frequency's 9th bit; low frequency |
-+     the low amplitude's 9th bit (0x80); the low amplitude's low 8 bits. Silence is 00 01 40 40 (both bands at 0, at
-+     320 and 160 Hz), as SDL sends it.
-+
-+   Pure (no state, no SDL): tests/test_hd_rumble.py compiles it. */
-+#pragma once
-+#include <math.h>
-+#include <stdint.h>
-+#include <string.h>
-+
-+#define HD_RUMBLE_PACKET_SIZE 10          /* (SDL's SwitchCommonOutputPacket_t: type, number, 2 x 4 bytes) */
-+#define HD_RUMBLE_REPORT 0x10             /* (k_eSwitchOutputReportIDs_Rumble) */
-+#define HD_RUMBLE_AMP_TOP 100             /* the amplitude code 1.003 has: the top the table calls safe */
-+#define HD_RUMBLE_GAP_NS 32000000LL       /* the least time between two packets (SDL: 30 ms; faster can turn a
-+                                             Bluetooth controller off, or the motors miss them over USB) */
-+#define HD_RUMBLE_REFRESH_NS 40000000LL   /* a rumble that goes on is sent again this often (SDL refreshes its own
-+                                             every 50 ms: the controller stops one it is not sent again) */
-+
-+/* What kind of Switch controller SDL says a pad is: 0 none of them (the motor path), else the side(s) it has. */
-+enum { HD_RUMBLE_NONE, HD_RUMBLE_PRO, HD_RUMBLE_JOYCON_LEFT, HD_RUMBLE_JOYCON_RIGHT, HD_RUMBLE_JOYCON_PAIR };
-+/* From SDL_GetGamepadType (SDL3: SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO 7, then JOYCON_LEFT, RIGHT, PAIR) or
-+   SDL_GameControllerGetType (SDL2: SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO 5, JOYCON_LEFT 11, RIGHT 12, PAIR 13). */
-+static inline int hd_rumble_kind(int sdl_version, int type) {
-+    if (sdl_version == 3) return type >= 7 && type <= 10 ? HD_RUMBLE_PRO + (type - 7) : HD_RUMBLE_NONE;
-+    if (sdl_version == 2) return type == 5 ? HD_RUMBLE_PRO : type >= 11 && type <= 13 ? HD_RUMBLE_JOYCON_LEFT + (type - 11) : HD_RUMBLE_NONE;
-+    return HD_RUMBLE_NONE;
-+}
-+
-+/* A frequency's code, round(log2(Hz / 10) * 32), kept to [lo, hi]; a frequency that is not one (0, NaN) gets
-+   otherwise. */
-+static inline int hd_rumble_freq_code(float hz, int lo, int hi, int otherwise) {
-+    if (!(hz > 0.0f)) return otherwise;   /* (also NaN) */
-+    const double c = floor(log2((double)hz / 10.0) * 32.0 + 0.5);
-+    return c < lo ? lo : c > hi ? hi : (int)c;
-+}
-+/* An amplitude's code, 0 to HD_RUMBLE_AMP_TOP (see above). */
-+static inline int hd_rumble_amp_code(float amp) {
-+    if (!(amp > 0.0f)) return 0;   /* (also NaN) */
-+    double c;
-+    if (amp > 0.2275f) c = floor(log2(8.7 * amp) * 32.0 + 0.5);             /* (between codes 31 and 32: 0.225, 0.230) */
-+    else if (amp > 0.1150f) c = floor(log2(17.0 * amp) * 16.0 + 0.5);       /* (15 and 16: 0.112, 0.117) */
-+    else if (amp >= 0.0039f) c = floor(4.0 * log2(119.6 * amp) + 0.5);       /* (half of code 1's 0.0078: less is 0) */
-+    else return 0;
-+    if (c < 1) c = 1;   /* (code 1, 0.0078, is off the 2^(1/4) steps: the smallest that plays) */
-+    return c > HD_RUMBLE_AMP_TOP ? HD_RUMBLE_AMP_TOP : (int)c;
-+}
-+
-+/* (issue 263, for HD rumble) The game's amplitudes as a Switch controller is to play them: OoT scales its rumble files
-+   by small gains (romfs RSDB/RumbleCall: 0.015 to 0.5, most effects 0.05 to 0.2), so what it asks for is mostly 0.02 to
-+   0.1 and played as it is a Pro Controller's actuators hardly move (a heart caught, 0.06 at 55 Hz, is not felt). Each
-+   band goes through the same curve as the motors' (nn_hid.c's rumble_motor, from Eden's SDL driver): (a + a^0.35) / 2,
-+   which keeps 0 and 1 and the order of the strengths (0.03 -> 0.16, 0.06 -> 0.22, 0.2 -> 0.38, 0.5 -> 0.64); what is
-+   below the encoding's smallest step (half of code 1) stays silent. Frequencies are kept. */
-+static inline float hd_rumble_felt_amp(float amp) {
-+    if (!(amp >= 0.0039f)) return 0.0f;   /* (also NaN) */
-+    const float felt = (amp + powf(amp, 0.35f)) * 0.5f;
-+    return felt > 1.0f ? 1.0f : felt;
-+}
-+static inline void hd_rumble_felt(const float v[4], float out[4]) {
-+    out[0] = hd_rumble_felt_amp(v[0]), out[1] = v[1];
-+    out[2] = hd_rumble_felt_amp(v[2]), out[3] = v[3];
-+}
-+
-+/* (a single Joy-Con) both sides' values as one: each band at the stronger side's amplitude, with that side's frequency
-+   (the left's when they are equal). The game always sees a full Pro Controller and may send an effect to one side only;
-+   a lone Joy-Con has one side, and plays what either side asks for, as the motor path's max of the two sides does. */
-+static inline void hd_rumble_merge(const float left[4], const float right[4], float out[4]) {
-+    for (int b = 0; b < 4; b += 2) {
-+        const int r = right[b] > left[b];   /* (NaN: not stronger, the left kept) */
-+        out[b] = r ? right[b] : left[b], out[b + 1] = r ? right[b + 1] : left[b + 1];
-+    }
-+}
-+
-+/* The silent side, 00 01 40 40. */
-+static inline void hd_rumble_neutral(uint8_t out[4]) {
-+    out[0] = 0x00, out[1] = 0x01, out[2] = 0x40, out[3] = 0x40;
-+}
-+/* One side's 4 bytes from the game's value {amp_low, freq_low, amp_high, freq_high}, its amplitudes scaled by percent
-+   (100 the game's own, 0 silence). Over 100, both bands get the same factor, the stronger stopping at 1 (as the motors'
-+   strength does: the bands keep their balance), and the top stays HD_RUMBLE_AMP_TOP. */
-+static inline void hd_rumble_encode(const float v[4], int percent, uint8_t out[4]) {
-+    float scale = percent > 0 ? (float)percent / 100.0f : 0.0f;
-+    const float top = v[0] > v[2] ? v[0] : v[2];
-+    if (scale > 1.0f && top * scale > 1.0f) scale = top > 1.0f ? 1.0f : 1.0f / top;   /* (NaN: not above, kept) */
-+    const int la = hd_rumble_amp_code(v[0] * scale), ha = hd_rumble_amp_code(v[2] * scale);
-+    if (!la && !ha) {
-+        hd_rumble_neutral(out);
-+        return;
-+    }
-+    const int lf = hd_rumble_freq_code(v[1], 0x41, 0xBF, 0x80) - 0x40;          /* (160 Hz when it has none) */
-+    const int hf = (hd_rumble_freq_code(v[3], 0x61, 0xDF, 0xA0) - 0x60) * 4;    /* (320 Hz) */
-+    const int ha2 = ha * 2, la9 = ((la & 1) << 15) | (la / 2 + 0x40);
-+    out[0] = (uint8_t)(hf & 0xFF);
-+    out[1] = (uint8_t)(ha2 | ((hf >> 8) & 0x01));
-+    out[2] = (uint8_t)(lf | ((la9 >> 8) & 0x80));
-+    out[3] = (uint8_t)(la9 & 0xFF);
-+}
-+
-+/* The packet SDL's effect call takes, from the game's left and right sides' bytes: a Pro Controller (and a pair)
-+   plays each side on its own; a single Joy-Con plays its own side (SDL's packet has both: it gets it in both). For a
-+   single Joy-Con, host/pad_sdl.c passes the two sides merged (hd_rumble_merge) as both. */
-+static inline void hd_rumble_packet(int kind, const uint8_t left[4], const uint8_t right[4], uint8_t out[HD_RUMBLE_PACKET_SIZE]) {
-+    out[0] = HD_RUMBLE_REPORT;
-+    out[1] = 0;   /* (SDL numbers the packets itself) */
-+    const uint8_t *l = kind == HD_RUMBLE_JOYCON_RIGHT ? right : left, *r = kind == HD_RUMBLE_JOYCON_LEFT ? left : right;
-+    memcpy(out + 2, l, 4);
-+    memcpy(out + 6, r, 4);
-+}
-+static inline int hd_rumble_silent(const uint8_t packet[HD_RUMBLE_PACKET_SIZE]) {
-+    static const uint8_t n[4] = {0x00, 0x01, 0x40, 0x40};
-+    return !memcmp(packet + 2, n, 4) && !memcmp(packet + 6, n, 4);
-+}
-+
-+/* Whether a pad's packet goes out now: packet the one the game asks for, sent the last one sent (silence before the
-+   first), sent_ns when, ever whether there was one. Never sooner than HD_RUMBLE_GAP_NS after the last; a change goes
-+   at once, then the latest when the gap is over (what the game asks for in between is not sent: a newer value takes its
-+   place); a rumble that goes on is sent again every HD_RUMBLE_REFRESH_NS; silence that was sent is not sent again. */
-+static inline int hd_rumble_due(const uint8_t packet[HD_RUMBLE_PACKET_SIZE], const uint8_t sent[HD_RUMBLE_PACKET_SIZE],
-+                                int ever, long long now, long long sent_ns) {
-+    if (ever && now - sent_ns < HD_RUMBLE_GAP_NS) return 0;
-+    if (memcmp(packet + 2, sent + 2, 8)) return 1;
-+    return ever && !hd_rumble_silent(sent) && now - sent_ns >= HD_RUMBLE_REFRESH_NS;
-+}
-+
-+/* A pad's HD rumble state, as the poll moves it: unknown until its first packet; on while SDL takes them; off (the
-+   motor path, for as long as the pad is open) once SDL refuses one, or when it has no effect call, is no Switch
-+   controller, or HOS_HD_RUMBLE=0. */
-+enum { HD_RUMBLE_UNKNOWN, HD_RUMBLE_ON, HD_RUMBLE_OFF };
-+static inline int hd_rumble_start(int kind, int have_call, int env_off) {
-+    return kind != HD_RUMBLE_NONE && have_call && !env_off ? HD_RUMBLE_UNKNOWN : HD_RUMBLE_OFF;
-+}
-+static inline int hd_rumble_after_send(int ok) { return ok ? HD_RUMBLE_ON : HD_RUMBLE_OFF; }
 diff --git a/host/hos_motion.h b/host/hos_motion.h
-index 7b6f3fe..143e740 100644
+index 7b6f3fe..382f21f 100644
 --- a/host/hos_motion.h
 +++ b/host/hos_motion.h
 @@ -1,22 +1,27 @@
@@ -663,7 +507,7 @@ index 7b6f3fe..143e740 100644
      return 1;
  }
 diff --git a/host/hos_sdl.c b/host/hos_sdl.c
-index 90897ae..ecea9c4 100644
+index 90897ae..7dac537 100644
 --- a/host/hos_sdl.c
 +++ b/host/hos_sdl.c
 @@ -20,6 +20,7 @@ static struct {
@@ -699,7 +543,7 @@ index 90897ae..ecea9c4 100644
  int hos_sdl_pad_has_sensor(void *pad, int type) {
      if (!f.PadHasSensor || !f.PadSensorEnable || !f.PadSensorData) return 0;
 diff --git a/host/hos_sdl.h b/host/hos_sdl.h
-index e64379c..bc1d2f6 100644
+index e64379c..c748f21 100644
 --- a/host/hos_sdl.h
 +++ b/host/hos_sdl.h
 @@ -73,6 +73,9 @@ int16_t hos_sdl_pad_axis(void *pad, int axis);
@@ -713,7 +557,7 @@ index e64379c..bc1d2f6 100644
  enum { HOS_SDL_SENSOR_ACCEL = 1, HOS_SDL_SENSOR_GYRO = 2 };
  int hos_sdl_pad_has_sensor(void *pad, int type);
 diff --git a/host/hos_update.c b/host/hos_update.c
-index 3eb970d..0eca2d0 100644
+index 3eb970d..f9c5c8e 100644
 --- a/host/hos_update.c
 +++ b/host/hos_update.c
 @@ -13,8 +13,8 @@
@@ -750,7 +594,7 @@ index 3eb970d..0eca2d0 100644
          }
          return;
 diff --git a/host/nn_hid.c b/host/nn_hid.c
-index d6fd95f..ba879f1 100644
+index d6fd95f..2a1f362 100644
 --- a/host/nn_hid.c
 +++ b/host/nn_hid.c
 @@ -938,7 +938,7 @@ HLE(_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_2
@@ -783,7 +627,7 @@ index d6fd95f..ba879f1 100644
  }
  static void vibration_value_idle(uint64_t v) {   /* VibrationValue {f32 amp_low, freq_low, amp_high, freq_high} */
 diff --git a/host/pad_sdl.c b/host/pad_sdl.c
-index 77ea6c7..c0f5e98 100644
+index 77ea6c7..7ee6c21 100644
 --- a/host/pad_sdl.c
 +++ b/host/pad_sdl.c
 @@ -20,6 +20,7 @@
@@ -960,7 +804,7 @@ index 61dc7dc..796c4f2 100644
    </PropertyGroup>
  
 diff --git a/launcher/Texts.cs b/launcher/Texts.cs
-index 8ebbe48..83085e3 100644
+index 8ebbe48..0db1a33 100644
 --- a/launcher/Texts.cs
 +++ b/launcher/Texts.cs
 @@ -23,8 +23,8 @@ static class Texts
@@ -974,8 +818,96 @@ index 8ebbe48..83085e3 100644
      public const string RepoPage = "https://github.com/" + Repo;
      public const string ReleasesPage = RepoPage + "/releases/latest";
      public const string HelpPage = RepoPage + "#readme";
+diff --git a/launcher/Updater.cs b/launcher/Updater.cs
+index 39ae532..5a46a51 100644
+--- a/launcher/Updater.cs
++++ b/launcher/Updater.cs
+@@ -74,6 +74,23 @@ static class Updater
+         return null;
+     }
+ 
++    /// The release's setup list is a small direct download and names its own tag. Resolve the setup from that tag instead
++    /// of asking the unauthenticated GitHub API for release metadata (which is limited to 60 requests an hour per IP).
++    static async Task<(string Tag, string SetupUrl)> LatestSetup(MainWindow w, HttpClient http, CancellationToken token)
++    {
++        using var response = await GetWithRetries(w, http, RepoPage + "/releases/latest/download/" + SetupList, token,
++            timeout: TimeSpan.FromSeconds(30));
++        var list = await response.Content.ReadAsStringAsync(token);
++        foreach (var line in list.Split('\n'))
++        {
++            if (!line.StartsWith("tag ", StringComparison.Ordinal)) continue;
++            var tag = line[4..].Trim();
++            if (tag.Length > 0)
++                return (tag, RepoPage + "/releases/download/" + Uri.EscapeDataString(tag) + "/" + SetupAsset);
++        }
++        throw new InvalidOperationException(L("La liste de mise à jour de GitHub n'a pas de version.", "GitHub's update list has no version."));
++    }
++
+     /// The latest release's setup downloaded and started with args: it installs the new launcher (only the parts that changed) and
+     /// starts it with the same args; this one closes.
+     public static async Task RunLatestSetup(MainWindow w, IEnumerable<string> args)
+@@ -81,23 +98,12 @@ static class Updater
+         var token = w.DownloadToken;
+         using var http = Client(Timeout.InfiniteTimeSpan);
+         w.Note(L("Recherche de la dernière version sur GitHub", "Asking GitHub for the latest release"));
+-        string? setupUrl = null, setupApiUrl = null;
+-        long setupSize = 0;
+-        using (var response = await GetWithRetries(w, http, Latest, token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
+-        using (var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token)))
+-            foreach (var asset in doc.RootElement.GetProperty("assets").EnumerateArray())
+-                if (asset.GetProperty("name").GetString() == SetupAsset)
+-                {
+-                    setupUrl = asset.GetProperty("browser_download_url").GetString();
+-                    setupApiUrl = asset.GetProperty("url").GetString();
+-                    setupSize = asset.GetProperty("size").GetInt64();
+-                }
+-        if (setupUrl == null) throw new InvalidOperationException(L($"La dernière version n'a pas de {SetupAsset}.", $"The latest release has no {SetupAsset}."));
++        var latest = await LatestSetup(w, http, token);
+         var cache = Path.Combine(Storage.Base, "update");
+         Directory.CreateDirectory(cache);
+         var setup = Path.Combine(cache, SetupAsset);
+         w.Note(L("Téléchargement du nouveau ReLink", "Downloading the new ReLink"));
+-        await DownloadWithRetries(w, http, setupUrl, setupApiUrl, setup, setupSize, token);
++        await DownloadWithRetries(w, http, latest.SetupUrl, null, setup, 0, token);
+         var si = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = cache };
+         foreach (var arg in args) si.ArgumentList.Add(arg);
+         Process.Start(si);
+@@ -134,22 +140,8 @@ static class Updater
+             var token = w.DownloadToken;
+             using var http = Client(Timeout.InfiniteTimeSpan);
+             w.Note(L("Recherche de la dernière version sur GitHub", "Asking GitHub for the latest release"));
+-            string? newTag = null, setupUrl = null, setupApiUrl = null;
+-            long setupSize = 0;
+-            using (var response = await GetWithRetries(w, http, Latest, token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
+-            using (var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token)))
+-            {
+-                newTag = doc.RootElement.GetProperty("tag_name").GetString();
+-                foreach (var asset in doc.RootElement.GetProperty("assets").EnumerateArray())
+-                    if (asset.GetProperty("name").GetString() == SetupAsset)
+-                    {
+-                        setupUrl = asset.GetProperty("browser_download_url").GetString();
+-                        setupApiUrl = asset.GetProperty("url").GetString();
+-                        setupSize = asset.GetProperty("size").GetInt64();
+-                    }
+-            }
+-            if (newTag == null || setupUrl == null)
+-                throw new InvalidOperationException(L($"La dernière version n'a pas de {SetupAsset}.", $"The latest release has no {SetupAsset}."));
++            var latest = await LatestSetup(w, http, token);
++            var newTag = latest.Tag;
+             if (newTag == tools.Version)
+             {
+                 w.UpdateBuild(tools, folder);
+@@ -159,7 +151,7 @@ static class Updater
+             Directory.CreateDirectory(cache);
+             w.Note(L($"Téléchargement de la mise à jour {newTag}", $"Downloading the update for {newTag}"));
+             var setup = Path.Combine(cache, SetupAsset);
+-            await DownloadWithRetries(w, http, setupUrl, setupApiUrl, setup, setupSize, token, w.DownloadProgress);
++            await DownloadWithRetries(w, http, latest.SetupUrl, null, setup, 0, token, w.DownloadProgress);
+             var si = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = cache };
+             foreach (var arg in new[] { "--update", folder, "--tag", newTag, "--fetched" }) si.ArgumentList.Add(arg);
+             Process.Start(si);
 diff --git a/launcher/setup/setup.c b/launcher/setup/setup.c
-index d08c6fa..1cd7806 100644
+index d08c6fa..ce4f848 100644
 --- a/launcher/setup/setup.c
 +++ b/launcher/setup/setup.c
 @@ -432,8 +432,8 @@ static const char *manifest_url(void) {
@@ -999,7 +931,7 @@ index d08c6fa..1cd7806 100644
                                 L"This is on GitHub's side: try again in a few minutes, or later today."
                               : L"Could not reach GitHub to get ReLink. Check your internet connection and try again.");
 diff --git a/recomplauncher.json b/recomplauncher.json
-index d034e01..003bd85 100644
+index d034e01..f1d2d25 100644
 --- a/recomplauncher.json
 +++ b/recomplauncher.json
 @@ -1,8 +1,8 @@
@@ -1014,7 +946,7 @@ index d034e01..003bd85 100644
      "kind": "iso_or_folder",
      "label": "Your copy of The Legend of Zelda: Ocarina of Time for Nintendo Switch 2, with its update installed (program 0400486024DEC000, update v131072, build e0f3ccfa): its .nup file, or a folder holding its exefs and romfs folders. Other versions do not work.",
 diff --git a/scripts/make_seed.py b/scripts/make_seed.py
-index 1b4c8aa..b7a184f 100644
+index 1b4c8aa..a34fb53 100644
 --- a/scripts/make_seed.py
 +++ b/scripts/make_seed.py
 @@ -83,7 +83,7 @@ def main():
@@ -1027,7 +959,7 @@ index 1b4c8aa..b7a184f 100644
      if not os.path.isfile(os.path.join(a.python, "python.exe")):
          sys.exit("%s: no python.exe" % a.python)
 diff --git a/scripts/make_setup_parts.py b/scripts/make_setup_parts.py
-index 3718640..e848e98 100644
+index 3718640..6eb557a 100644
 --- a/scripts/make_setup_parts.py
 +++ b/scripts/make_setup_parts.py
 @@ -73,7 +73,7 @@ def main():
