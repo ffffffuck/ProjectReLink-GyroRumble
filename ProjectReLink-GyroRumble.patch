@@ -49,39 +49,6 @@ index 95b414b..97c014b 100644
  2. Lancez-le. Il télécharge ReLink et ses outils (environ 310 Mo), les vérifie et ouvre le lanceur. Rien d'autre à installer.
  3. Choisissez votre copie du jeu : le lanceur cherche les `.nup` dans Téléchargements, Bureau et Documents ; vous pouvez aussi
     en choisir un, le déposer sur la fenêtre, ou donner les dossiers `romfs` et `exefs`.
-diff --git a/docs/releasing.md b/docs/releasing.md
-index b7c40b2..3bf5d28 100644
---- a/docs/releasing.md
-+++ b/docs/releasing.md
-@@ -8,9 +8,14 @@ release of their own, `builder-parts`. No game data is involved at any step.
- 
- 1. Set the version in `launcher/ReLink.csproj` (`<Version>`), commit, and push to `main`. The workflow runs on every push and
-    leaves its files as an artifact (`ReLink-windows`): a failed run here is found before the tag.
--2. Tag the commit `vX.Y.Z` and push the tag.
--3. The workflow builds the package again for the tag, uploads the new parts to `builder-parts`, and creates the release with
--   `ReLink-Setup.exe` and `relink-setup.txt`. A tag with `-rc` is a prerelease and never "latest".
-+2. For an upstream sync, the sync workflow opens a PR and waits for the Windows package and Vulkan checks. If they pass, it
-+   merges the PR and dispatches the Windows release build. The first merge for an upstream version is tagged
-+   `vX.Y.Z-gyro-rumble-fix`; further syncs on that same upstream version add `.1`, `.2`, and so on. The release includes
-+   the installer, setup list and RecompLauncher zip. Failed checks leave the PR open and do not publish. The version comes
-+   from `launcher/ReLink.csproj`, so prior fork tags cannot make it lag behind upstream. Ordinary pushes to `main` still
-+   only build artifacts.
-+3. For other releases, tag the commit `vX.Y.Z` and push the tag. The workflow uploads the new parts to `builder-parts` and
-+   creates the release. A tag with `-rc` is a prerelease and never "latest".
- 
- Players' launchers then offer the update: they compare the game folder's version with the latest release's tag.
- 
-@@ -22,6 +27,10 @@ https://recomplauncher.com/schema/recomplauncher.json.
- 
- ## The seed: the first release, new tools, a new play profile
- 
-+For the first release of this fork, set the repository variable `BOOTSTRAP_REPO` to `pixl27/ProjectReLink`. The workflow uses
-+the upstream release's build-tool parts and profile, then publishes copies under this repository's `builder-parts` release.
-+Later releases use this fork's own parts automatically.
-+
- The setup installs six parts. Three are made from this repository at every release: the launcher with the sources and the
- play profile (`app`), .NET's runtime (`dotnet`) and `third_party`. llvm-mingw, the compiler, comes from its own official
- release. The other two are tools that change rarely and are not rebuilt in CI: Python with the build's modules (`python`)
 diff --git a/gpu/vk/vk_api.h b/gpu/vk/vk_api.h
 index 6f326ca..dc69952 100644
 --- a/gpu/vk/vk_api.h
