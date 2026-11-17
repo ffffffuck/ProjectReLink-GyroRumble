@@ -35,6 +35,7 @@
 #include <xinput.h>
 #include "../gpu/vk/vk_api.h"   /* (the controls' names: HOS_SW_*, HOS_PAD_*) */
 #include "hos_motion.h"
+#include "hos_stick.h"
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN };
 #define STATE_SIZE 0x28
@@ -586,11 +587,9 @@ static void pads_read(uint64_t *buttons, int32_t stick[4]) {
         if (xs.Gamepad.bLeftTrigger > 64) raw |= 1ULL << HOS_PAD_LTRIGGER;
         if (xs.Gamepad.bRightTrigger > 64) raw |= 1ULL << HOS_PAD_RTRIGGER;
         const int16_t thumb[4] = {xs.Gamepad.sThumbLX, xs.Gamepad.sThumbLY, xs.Gamepad.sThumbRX, xs.Gamepad.sThumbRY};
-        int32_t v[4];
-        for (int i = 0; i < 4; i++) {
-            const int a = thumb[i] < -32767 ? -32767 : thumb[i];
-            v[i] = (a > 7849 || a < -7849) ? a : 0;
-        }
+        int32_t v[4];   /* (round dead zones, the Controls tab's: host/hos_stick.h) */
+        hos_stick_apply(thumb[0], thumb[1], hos_stick_deadzone_percent(0), v);
+        hos_stick_apply(thumb[2], thumb[3], hos_stick_deadzone_percent(1), v + 2);
         int rx_option(int id, int otherwise);
         if (rx_option(16, 0)) v[2] = -v[2];
         if (rx_option(17, 0)) v[3] = -v[3];

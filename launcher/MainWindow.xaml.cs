@@ -58,6 +58,7 @@ public partial class MainWindow : Window
         Drop += Dropped;
         Loaded += (_, _) => Start();
         Closing += (_, _) => Native.RestoreRefresh();
+        Activated += (_, _) => { if (view == View.Home && game == null && !snapshot) ShowMods(); };   // (mods added while it was open)
         AppDomain.CurrentDomain.UnhandledException += (_, _) => Native.RestoreRefresh();
     }
 
@@ -76,6 +77,7 @@ public partial class MainWindow : Window
         DiscordLink.Content = "Discord";
         DiscordLink.ToolTip = new ToolTip { Style = St("Tip"), Content = L($"Rejoindre le serveur Discord de {Texts.Name}", $"Join the {Texts.Name} Discord server") };
         UpdateLink.Content = L("Mettre à jour", "Update");
+        RebuildLink.Content = L("Reconstruire", "Build again");
 
         InstallTitle.Text = L("Installer le jeu", "Install the game");
         InstallSub.Text = L("ReLink fabrique le jeu sur ce PC à partir de votre propre copie. Il faut le jeu avec sa mise à jour v131072 (build e0f3ccfa) : les autres versions ne fonctionnent pas. Cela se fait une fois et prend de 10 à 45 minutes.",
@@ -180,6 +182,7 @@ public partial class MainWindow : Window
         MainButton.Visibility = v is View.Install or View.Ready or View.Home ? Visibility.Visible : Visibility.Collapsed;
         MainNote.Visibility = MainButton.Visibility;
         StatusRow.Visibility = v == View.Home ? Visibility.Visible : Visibility.Collapsed;
+        if (v != View.Home) ModsRow.Visibility = Visibility.Collapsed;
         FolderLink.Visibility = v is View.Ready or View.Home ? Visibility.Visible : Visibility.Collapsed;
         if (v is View.Ready or View.Home) MainButtonText.Text = L("Jouer", "Play");
     }
@@ -226,7 +229,7 @@ public partial class MainWindow : Window
     }
 
     // ================= pictures of the window, for checking it (nothing is run) =================
-    //   ReLink.exe --snapshot out.png --view install|build|update|ready|problem|home|home-update|smooth|game|controls|playing
+    //   ReLink.exe --snapshot out.png --view install|build|update|ready|problem|home|home-update|home-mods|smooth|game|controls|playing
 
     void Preview(string what)
     {
@@ -287,6 +290,7 @@ public partial class MainWindow : Window
                     StatusText.Text = L("Version v0.6.1. La v0.7.0 est disponible.", "Version v0.6.1. v0.7.0 is available.");
                     UpdateLink.Visibility = Visibility.Visible;
                 }
+                if (what == "home-mods") ShowMods(preview: 2);
                 if (what == "smooth") TabSmooth.IsChecked = true;
                 else if (what == "game") TabGame.IsChecked = true;
                 else if (what == "controls") TabControls.IsChecked = true;

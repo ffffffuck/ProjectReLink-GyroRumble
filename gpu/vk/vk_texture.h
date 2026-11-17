@@ -83,6 +83,7 @@ struct Texture {
     bool vw_listed = false;   // (in the list of GPU-written textures of virtual pools: texture_flush_to_guest)
     uint64_t prefetched_frame = 0;   // (relink, RX_VK_PREFETCH: the present it was made ahead at, 0: made by a draw)
     bool drawn = false;              // (and whether a draw used it since)
+    bool keytex_wait = false;  // (relink) one of the HUD cross's letters, uploaded before its family was known (prompt_tex.h)
     std::unordered_map<uint64_t, VkImageView> views;
     // (relink, issue 21) a compressed image the game renders into through raw views (one texel a block): a plain image of
     // the view's format, a level's size in blocks, stands in for that level as the attachment (vk_texture.cpp stand-ins)
@@ -216,5 +217,8 @@ void texture_stats(int64_t* uploads, int64_t* astc_gpu, int64_t* bytes_uploaded)
 /// RX_VK_DUMP_TEX: the textures uploaded next written to that folder as PPM (diagnostics)
 void texture_read_texels(const nvn_tex* t, unsigned level, unsigned layer0, const NVNcopyRegion* r, uint8_t* dst,
                          uint64_t row, uint64_t img, bool write);
+/// (relink) A texture of the HUD cross letters' shape (prompt_tex.h): BC4 UNORM, 2D, 64 x 64, one level, one layer. Only
+/// those have their blocks hashed at upload
+bool prompt_tex_shape(const Texture& t);
 
 } // namespace mkwvk

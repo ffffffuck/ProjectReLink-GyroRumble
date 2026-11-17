@@ -236,11 +236,42 @@ def patch_menu_tick(source):
         '#include "a64.h"\n', '#include "a64.h"\nextern int hos_wheel_menu_tick(Ctx *c, uint64_t screen);\n', 1)
 
 
-def apply(gen, *, protect_hearts=False, required=False):
+class ExefsModConflict(SystemExit):
+    """An exefs mod changes a function where ReLink's own change must go: the build stops with this text, said as it is"""
+
+
+# (exefs mods, nx2/exefs_mods.py) the function each patch goes into, to name the mod's patch in the way of one
+FUNCS = {"dynamic resolution branch": "f_80825aa0", "text speed block": "f_80b1e140", "fixed path's scale": "f_831f3200",
+         "menu screens' update": "f_802f1380", "player heart protection": "f_804bd8c0", "player flight": "f_82c415e0",
+         "player flight rotation": "f_806d2530", "free camera": "f_804e48c0", "zstd sequence loop": "f_801102e0",
+         "name searches": "f_805aeea0"}
+# (the two ReLink runs natively, host/zstd_native.c and host/names_native.c: in a function a patch changes they are left out
+# even where their text is found, or the host's code would run in place of the patched one)
+NATIVE = {"zstd sequence loop": "host/zstd_native.c", "name searches": "host/names_native.c"}
+
+
+def mod_note(notes, modded, func, text):
+    """A line for relink_exefs_mods.txt (and the lift's output) when an exefs mod changes func: True when one does"""
+    labels = (modded or {}).get(func)
+    if not labels:
+        return False
+    line = "warning   %s: it changes %s, %s" % (", ".join(labels), func, text)
+    print("oot_patches: exefs mods: " + line)
+    if notes is not None:
+        notes.append(line)
+    return True
+
+
+def apply(gen, *, protect_hearts=False, required=False, modded=None, notes=None):
     """required: the lift of the supported build (LIFE_BUILD_ID), whole: a missing output-size edit stops it (apply_output_size).
-    The other patches only warn when their place is not found once."""
+    The other patches only warn when their place is not found once. modded: {function name: [exefs mod patches]} of the
+    functions exefs mods change (nx2/exefs_mods.py); notes: the list their lines go to"""
     import oot_native_resolution   # (HOS_SCENE_NATIVE=1: the scene's base scale 1.0; off by default since #849's output resolution)
-    oot_native_resolution.apply(gen)
+    oot_native_resolution.apply(gen, modded=modded, notes=notes)
+    skip = {what for what, func in FUNCS.items() if what in NATIVE and func in (modded or {})}
+    for what in sorted(skip):
+        mod_note(notes, modded, FUNCS[what], "which ReLink runs natively (its %s, %s): left out, the patched game code "
+                 "runs instead" % (what, NATIVE[what]))
     done = {"dynamic resolution branch": 0, "text speed block": 0, "fixed path's scale": 0, "menu screens' update": 0}
     if protect_hearts:
         done["player heart protection"] = 0
@@ -292,12 +323,12 @@ def apply(gen, *, protect_hearts=False, required=False):
             out = view
             done["free camera"] += 1
             print("oot_patches: free camera in", os.path.basename(path))
-        zstd = patch_zstd(out) if protect_hearts else None
+        zstd = patch_zstd(out) if protect_hearts and "zstd sequence loop" not in skip else None
         if zstd is not None:
             out = zstd
             done["zstd sequence loop"] += 1
             print("oot_patches: native zstd sequence loop in", os.path.basename(path))
-        names = patch_names(out) if protect_hearts else None
+        names = patch_names(out) if protect_hearts and "name searches" not in skip else None
         if names is not None:
             out = names
             done["name searches"] += 1
@@ -306,9 +337,13 @@ def apply(gen, *, protect_hearts=False, required=False):
             with open(path, "w", encoding="utf-8", newline="") as f:
                 f.write(out)
     for what, n in done.items():
+        if what in skip:
+            continue
         if n != 1:
             print("oot_patches: WARNING: the %s was found %d times" % (what, n))
-    apply_output_size(gen, required=required)
+            mod_note(notes, modded, FUNCS[what], "where ReLink's %s goes, and its place there was not found: left out (that "
+                     "option or fix of ReLink does nothing)" % what)
+    apply_output_size(gen, required=required, modded=modded)
 
 
 # Output size (host/nn_applet.c hos_output_size: the Insert menu's Output resolution, 2560 x 1440 as shipped):
@@ -371,10 +406,15 @@ OUT_EDITS = [
 ]
 
 
-def apply_output_size(gen, required=False):
+# (exefs mods) the function each OUT_EDITS place is in
+OUT_FUNCS = ["f_81222ce0", "f_810a7b70", "f_80ea2f30", "f_80ea2f30", "f_836ce9d0", "f_83b7b340", "f_83b7b340", "f_80b72340"]
+
+
+def apply_output_size(gen, required=False, modded=None):
     """required (the supported build's whole lift): each edit must be made, or found made, exactly once, else SystemExit: without
     one the Insert menu's Output resolution is ignored, or a 4K output runs out of the render targets' pool. Elsewhere (another
-    build, part of a lift, by hand) a warning"""
+    build, part of a lift, by hand) a warning. When an exefs mod changes a function one that is missing goes into (modded), the
+    stop names the mod's patch (ExefsModConflict): the edits go together, and a part of them crashes at a large output"""
     found = [0] * len(OUT_EDITS)
     for path in sorted(glob.glob(os.path.join(gen, "code_*.c"))):
         with open(path, encoding="utf-8", newline="") as f:
@@ -396,6 +436,14 @@ def apply_output_size(gen, required=False):
                 f.write(s)
             print("oot_patches: output size in", os.path.basename(path))
     if found != [1] * len(OUT_EDITS):
+        missing = [i for i, n in enumerate(found) if n != 1]
+        hit = sorted({(OUT_FUNCS[i], ", ".join((modded or {})[OUT_FUNCS[i]])) for i in missing if OUT_FUNCS[i] in (modded or {})})
+        if required and hit:
+            raise ExefsModConflict(
+                "The exefs mod patch %s changes the game's code in %s, where ReLink sets the game's output resolution (the "
+                "in-game menu's Output resolution, and the memory for the render targets). ReLink cannot apply both: take that "
+                "patch out of the mods folder (or put _ before its mod's folder name to turn the mod off), then build the game "
+                "again." % (" and ".join(h[1] for h in hit), " and ".join(h[0] for h in hit)))
         if required:
             raise SystemExit("oot_patches: the output size places were found %s times, not once each (OUT_EDITS %s): the "
                              "lifted C no longer has the text they match" % (found, [i for i, n in enumerate(found) if n != 1]))

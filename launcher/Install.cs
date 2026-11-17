@@ -817,15 +817,15 @@ public partial class MainWindow
     }
 
     /// The game folder built again with the tools there are (NVIDIA DLSS turned on: what it changes is compiled, NVIDIA's SDK
-    /// fetched first), on the update's screen with nothing to download
-    internal void Rebuild(Tools tools, string folder)
+    /// fetched first; or the exefs mods changed: Home.cs RebuildClick), on the update's screen with nothing to download
+    internal void Rebuild(Tools tools, string folder, string? title = null)
     {
         updating = true;
         outPath = folder;
         finished = "";
         MakeRows(update: true);
         rows.GetValueOrDefault("download")?.Small(L("Rien à télécharger", "Nothing to download"));
-        BuildTitle.Text = L("Reconstruction du jeu avec NVIDIA DLSS", "Building your game again with NVIDIA DLSS");
+        BuildTitle.Text = title ?? L("Reconstruction du jeu avec NVIDIA DLSS", "Building your game again with NVIDIA DLSS");
         BuildSub.Text = folder;
         Run(tools, new List<string> { "--update", folder }, keepRows: true);
     }

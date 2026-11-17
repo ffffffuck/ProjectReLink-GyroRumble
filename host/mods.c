@@ -7,8 +7,10 @@
    Every mod file is indexed once at the start (no disk lookups per open); nn_fs.c asks hos_mods_romfs for each rom:
    path and lists a folder's mod-only entries with the game's own (hos_mods_dir_extras). HOS_FS_OVERLAY (nn_fs.c) is
    looked at after this, so a test overlay wins over mods.
-   exefs patches (.pchtxt, .ips) are not applied: the code is compiled ahead of time from the original instructions, and
-   the game folder has no module map (image.json) to place data patches with. A mod's exefs folder is logged as left out.
+   exefs patches (<mods>/<name>/exefs/<build id>.ips or <file>.pchtxt) are applied when the game is built, not here: the code is translated
+   ahead of time (nx2/exefs_mods.py patches a copy of the modules before the translation). At the start the game hashes the
+   patch files there now (mods_exefs.c) and compares that with relink_exefs_mods.txt, which the build wrote: when they
+   differ, the player is told once that the game must be built again from the launcher for them to take effect.
    From Skybound's loader (NotRexed/SkyboundTotk a64-kit/hos/mods.c, MIT): its RomFS part. */
 #include "hos.h"
 #include "hos_paths.h"
@@ -133,9 +135,148 @@ static void find_mods(const char *dir, const char *name, int depth) {
 }
 static int mod_cmp(const void *a, const void *b) { return _stricmp(((const Mod *)a)->name, ((const Mod *)b)->name); }
 
-/* hos_main.c, once the image is loaded (image_path: kept for exefs patches, which are not applied here) */
+/* ---- exefs patches: built in or not */
+int hos_exefs_patch_hash(const char *root, uint64_t *hash, void (*each)(void *arg, const char *rel, uint64_t size), void *arg);
+
+/* the game folder's file name as a UTF-8 path (the mods root's own is mods_root_utf8) */
+static int folder_file_utf8(const char *name, char *out, size_t cap) {
+#ifdef _WIN32
+    wchar_t w[MAX_PATH * 2];
+    DWORD n = hos_game_path_w(w, MAX_PATH * 2);
+    if (!n || n >= MAX_PATH * 2) return 0;
+    wchar_t *slash = w + n;
+    while (slash > w && slash[-1] != L'\\' && slash[-1] != L'/') slash--;
+    *slash = 0;
+    char dir[MAX_PATH * 4];
+    if (!WideCharToMultiByte(CP_UTF8, 0, w, -1, dir, sizeof dir, NULL, NULL)) return 0;
+    snprintf(out, cap, "%s%s", dir, name);
+#else
+    char dir[MAX_PATH];
+    DWORD n = hos_game_path_a(dir, sizeof dir);
+    if (!n || n >= sizeof dir) return 0;
+    char *slash = (char *)last_sep(dir);
+    if (!slash) return 0;
+    slash[1] = 0;
+    snprintf(out, cap, "%s%s", dir, name);
+#endif
+    return 1;
+}
+
+static FILE *open_utf8(const char *path, const char *mode) {
+#ifdef _WIN32
+    wchar_t w[MAX_PATH * 2], m[8];
+    if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, w, MAX_PATH * 2) || !MultiByteToWideChar(CP_UTF8, 0, mode, -1, m, 8)) return NULL;
+    return _wfopen(w, m);
+#else
+    return fopen(path, mode);
+#endif
+}
+
+static void mods_root_utf8(char *out, size_t cap) {
+#ifdef _WIN32
+    const wchar_t *env = _wgetenv(L"HOS_MODS");
+    if (env && *env) {
+        if (!WideCharToMultiByte(CP_UTF8, 0, env, -1, out, (int)cap, NULL, NULL)) out[0] = 0;
+        return;
+    }
+#else
+    if (getenv("HOS_MODS")) { snprintf(out, cap, "%s", getenv("HOS_MODS")); return; }
+#endif
+    if (!folder_file_utf8("mods", out, cap)) out[0] = 0;
+}
+
+typedef struct { char text[1024]; int n; } PatchNames;
+static void patch_named(void *arg, const char *rel, uint64_t size) {
+    PatchNames *p = (PatchNames *)arg;
+    (void)size;
+    const size_t used = strlen(p->text);
+    if (used + strlen(rel) + 8 < sizeof p->text) snprintf(p->text + used, sizeof p->text - used, "%s%s", p->n ? ", " : "", rel);
+    else if (used + 6 < sizeof p->text && !strstr(p->text, "...")) strcat(p->text, ", ...");
+    p->n++;
+}
+
+/* The patch files in mods now beside the ones the game was built with (relink_exefs_mods.txt's first line: their hash, or
+   none). The same: one log line with what the build applied. Not the same (one added, changed or removed since, or a folder
+   built before exefs mods were read, with some there now): a log line, and the player is told once for that set of files
+   (relink_exefs_mods_told.txt keeps which; HOS_HEADLESS=1 never) that they take effect after a build from the launcher */
+static void exefs_check(void) {
+    char root[MAX_PATH * 4], report[MAX_PATH * 4], told_path[MAX_PATH * 4];
+    mods_root_utf8(root, sizeof root);
+    if (!root[0] || !folder_file_utf8("relink_exefs_mods.txt", report, sizeof report) ||
+        !folder_file_utf8("relink_exefs_mods_told.txt", told_path, sizeof told_path))
+        return;
+    uint64_t h = 0;
+    PatchNames names = {{0}, 0};
+    const int n = hos_exefs_patch_hash(root, &h, patch_named, &names);
+    char now[32];
+    if (n) snprintf(now, sizeof now, "%016llx", (unsigned long long)h);
+    else snprintf(now, sizeof now, "none");
+    char built[64] = "", applied[1024] = "", line[1024];
+    int have = 0, left_out = 0, warnings = 0;
+    FILE *f = open_utf8(report, "rb");
+    if (f) {
+        have = 1;
+        if (fgets(built, sizeof built, f)) built[strcspn(built, "\r\n")] = 0;
+        while (fgets(line, sizeof line, f)) {
+            line[strcspn(line, "\r\n")] = 0;
+            if (!strncmp(line, "applied ", 8)) {
+                const char *what = line + 8;
+                while (*what == ' ') what++;
+                const size_t used = strlen(applied);
+                if (used + strlen(what) + 8 < sizeof applied) snprintf(applied + used, sizeof applied - used, "%s%s", used ? "; " : "", what);
+            } else if (!strncmp(line, "left out ", 9)) {
+                left_out++;
+            } else if (line[0] && line[0] != '#' && strncmp(line, "note ", 5)) {
+                warnings++;
+            }
+        }
+        fclose(f);
+    }
+    if (!strcmp(now, built) || (!n && !have)) {
+        if (n)
+            hos_log("mods: exefs: the game was built with these %d patch files (%s): applied: %s; %d left out, %d warnings "
+                    "(relink_exefs_mods.txt)", n, now, applied[0] ? applied : "none", left_out, warnings);
+        return;
+    }
+    if (n)
+        hos_log("mods: exefs: the patch files in %s (%d, hash %s: %s) are not the ones the game was built with (%s): they take "
+                "effect after the game is built again from the launcher", root, n, now, names.text,
+                have ? built : "no relink_exefs_mods.txt");
+    else
+        hos_log("mods: exefs: no patch file in %s now, and the game was built with some (%s): it keeps them until it is built "
+                "again from the launcher", root, built);
+    char told[64] = "";
+    if ((f = open_utf8(told_path, "rb"))) {
+        if (fgets(told, sizeof told, f)) told[strcspn(told, "\r\n")] = 0;
+        fclose(f);
+    }
+    if (getenv("HOS_HEADLESS") || !strcmp(told, now)) return;
+    if ((f = open_utf8(told_path, "wb"))) {
+        fprintf(f, "%s\n", now);
+        fclose(f);
+    }
+#ifdef _WIN32
+    char text[2048];
+    if (n)
+        snprintf(text, sizeof text, "The code patches (exefs) in the mods folder have changed since this game was built: %d patch "
+                 "file%s there now (%s).\n\nReLink translates the game's code when it builds the game, so a code patch takes effect "
+                 "only once the game is built again: open ReLink and choose Build again on its first page (it builds with the "
+                 "patches in the mods folder). The game starts now as it was built. RomFS mods work as they are.",
+                 n, n == 1 ? "" : "s", names.text);
+    else
+        snprintf(text, sizeof text, "The code patches (exefs) this game was built with are no longer in the mods folder.\n\n"
+                 "ReLink translates the game's code when it builds the game, so the game keeps them until it is built again: "
+                 "open ReLink and choose Build again on its first page. The game starts now as it was built.");
+    wchar_t wtext[2048];   /* (the mods' names are UTF-8) */
+    if (MultiByteToWideChar(CP_UTF8, 0, text, -1, wtext, 2048))
+        MessageBoxW(NULL, wtext, L"Project ReLink: mods", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+#endif
+}
+
+/* hos_main.c, once the image is loaded (image_path: unused; exefs patches are applied when the game is built) */
 void hos_mods_init(const char *image_path) {
     (void)image_path;
+    exefs_check();
     char root[MAX_PATH];
     if (getenv("HOS_MODS")) {
         snprintf(root, sizeof root, "%s", getenv("HOS_MODS"));
@@ -148,7 +289,7 @@ void hos_mods_init(const char *image_path) {
     if (GetFileAttributesA(root) == INVALID_FILE_ATTRIBUTES) return;
     find_mods(root, "", 0);
     if (!nmods) {
-        hos_log("mods: none in %s (a mod: <name>\\romfs)", root);
+        hos_log("mods: none in %s (a mod: <name>\\romfs, or <name>\\exefs for code patches)", root);
         return;
     }
     qsort(mods, (size_t)nmods, sizeof *mods, mod_cmp);
@@ -156,9 +297,6 @@ void hos_mods_init(const char *image_path) {
         char dir[MAX_PATH];
         snprintf(dir, sizeof dir, "%s\\romfs", mods[i].path);
         const int files = index_romfs(dir, "");
-        snprintf(dir, sizeof dir, "%s\\exefs", mods[i].path);
-        if (GetFileAttributesA(dir) != INVALID_FILE_ATTRIBUTES)
-            hos_log("mods: %s: exefs patches are left out (the code is compiled ahead of time)", mods[i].name);
         hos_log("mods: %s: %d RomFS files", mods[i].name, files);
     }
     hos_log("mods: %d mods from %s: %zu RomFS entries", nmods, root, table_n);

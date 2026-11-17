@@ -181,6 +181,7 @@ struct State {
     float last_jitter[2]{};   // (its camera's jitter: the frame before's, for the next one)
     float last_vp[16]{};      // (its camera's view-projection: the frame before's)
     std::atomic<uint32_t> jitter_w{0}, jitter_h{0};   // (the scene's size while DLSS draws: the host's jitter's scale)
+    std::atomic<float> lod_bias{0.0f};                 // (relink: the textures' mip bias while it draws, upscaler_lod_bias)
     std::atomic<uint32_t> jitter_phases{8};           // (its sequence's length, for DLSS's scale: dlss_jitter_phases)
     std::unordered_map<VkImage, VkImageView> depth_views;
     uint64_t depth_views_gen = 0;
@@ -230,6 +231,26 @@ struct State {
 State& st() {
     static State s;
     return s;
+}
+
+// (relink) The textures' mip bias while DLSS or FSR scales the 3D up from rw to ow pixels wide: log2(rw / ow) - 1, as AMD's FSR 2+
+// guide gives it (NVIDIA's DLSS guide asks for the same kind of negative bias). Without it the textures were sampled at the mip
+// levels of the render size, so the upscaled picture had the render size's texture detail: soft, "muddy", even with DLAA. In
+// quarter steps (a sampler per value: the dynamic resolution moves the render size every few frames), between -2.5 and 0.
+// RX_VK_UPSCALE_LOD_OFFSET=<float>: another offset than -1; RX_VK_UPSCALE_LOD_BIAS=0: none, as before
+float lod_bias_for(uint32_t rw, uint32_t ow) {
+    static const bool off = getenv("RX_VK_UPSCALE_LOD_BIAS") && atoi(getenv("RX_VK_UPSCALE_LOD_BIAS")) == 0;
+    static const float offset = getenv("RX_VK_UPSCALE_LOD_OFFSET") ? (float)atof(getenv("RX_VK_UPSCALE_LOD_OFFSET")) : -1.0f;
+    if (off || !rw || !ow) return 0.0f;
+    float bias = std::log2((float)rw / (float)ow) + offset;
+    bias = std::clamp(std::round(bias * 4.0f) / 4.0f, -2.5f, 0.0f);
+    static int told = 1000;
+    const int q = (int)std::lround(bias * 4.0f);
+    if (q != told) {
+        told = q;
+        logf("vk: texture mip bias %.2f while the upscaler draws (%u to %u pixels wide)", (double)bias, rw, ow);
+    }
+    return bias;
 }
 
 bool fail(const char* why) {   // (the network runs: why, when it changes and every 600th time)
@@ -992,6 +1013,14 @@ uint32_t dlss_jitter_size(int axis) {
     return axis ? s.jitter_h.load(std::memory_order_relaxed) : s.jitter_w.load(std::memory_order_relaxed);
 }
 
+float upscaler_lod_bias() {
+    // (relink: worked out once a frame where DLSS or FSR draws, lod_bias_for; read here by every sampler lookup, ~48000 a frame)
+    State& s = st();
+    const uint64_t last = s.last_frame.load(std::memory_order_relaxed);
+    if (!last || texture_frame_no() - last > 30) return 0.0f;
+    return s.lod_bias.load(std::memory_order_relaxed);
+}
+
 int dlss_status(char* b, size_t n) {
     State& s = st();
     const uint64_t last = s.last_frame.load(std::memory_order_relaxed);
@@ -1364,6 +1393,7 @@ bool dlss_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in, Vk
     std::memcpy(s.last_vp, cam.current, sizeof s.last_vp);
     // (the jitter's length: FFX's for FSR, NVIDIA's guide for DLSS: dlss_math.h)
     s.jitter_w = rw, s.jitter_h = rh;
+    s.lod_bias = lod_bias_for(rw, dw);   // (relink: upscaler_lod_bias)
     s.jitter_phases = (uint32_t)(fsr && s.fsr_phases > 0 ? s.fsr_phases : dlss_jitter_phases(rw, rh, dw, dh));
     if (s.reason) logf("vk: %s draws the upscale again (frame %llu)", backend_name(mode), (unsigned long long)now);
     s.reason = nullptr;

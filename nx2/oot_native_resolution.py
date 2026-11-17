@@ -77,7 +77,8 @@ def patch_scene(s):
     return s.replace(HEADER, HEADER + SCENE_DECL, 1)
 
 
-def apply(gen):
+def apply(gen, modded=None, notes=None):
+    """modded, notes: the functions exefs mods change and the list their lines go to (nx2/oot_patches.py mod_note)"""
     done = {"scene base scale (f_806702e0)": 0, "scene scale check (f_831f3200)": 0}
     for path in sorted(glob.glob(os.path.join(gen, "code_*.c"))):
         with open(path, encoding="utf-8", newline="") as f:
@@ -95,3 +96,6 @@ def apply(gen):
     for what, n in done.items():
         if n != 1:
             print("oot_native_resolution: WARNING: the %s was found %d times" % (what, n))
+            import oot_patches
+            oot_patches.mod_note(notes, modded, what[what.index("(") + 1:-1], "where ReLink's %s goes, and its place there "
+                                 "was not found: left out (that option or fix of ReLink does nothing)" % what)

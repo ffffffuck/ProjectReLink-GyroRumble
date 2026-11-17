@@ -10,10 +10,32 @@
 #include "vk_draw.h"   // (end_pass: a pass cannot stay open across a transfer)
 #include "vk_texture.h"
 #include "vk_gprof.h"
+#include "prompt_tex.h"
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
 
 namespace mkwvk {
 namespace {
+
+/// (relink) A copy of a whole buffer into a texture of the HUD cross letters' shape (prompt_tex.h) whose bytes, as the CPU
+/// sees them, are one of the game's four letters: true when it is, so that the copy goes the CPU's way and the upload that
+/// follows takes ReLink's mask
+bool keytex_copy(const nvn_p_copy_bt& p, int64_t copy_stride) {
+    const nvn_view* v = p.has_view ? &p.view : nullptr;
+    const nvn_texdesc& d = p.tex->d;
+    if (vk_format(view_nvn_format(p.tex, v)).format != VK_FORMAT_BC4_UNORM_BLOCK || d.target != NVN_TEXTURE_TARGET_2D ||
+        d.width != prompt_tex::kSize || d.height != prompt_tex::kSize || d.levels > 1 || view_level(v) || view_layer(v) ||
+        p.r.xoffset || p.r.yoffset || p.r.zoffset || p.r.width != (int)prompt_tex::kSize || p.r.height != (int)prompt_tex::kSize ||
+        p.r.depth > 1)
+        return false;
+    constexpr uint64_t row = prompt_tex::kSize / 4 * 8, rows = prompt_tex::kSize / 4;   // (BC4: 8 bytes a 4 x 4 block)
+    const uint64_t stride = copy_stride > 0 ? (uint64_t)copy_stride : row;
+    uint64_t avail = 0;
+    const uint8_t* src = host->gpu_ptr(p.buf, &avail);
+    if (!src || stride < row || avail < stride * (rows - 1) + row) return false;
+    uint8_t blocks[prompt_tex::kBlocks];
+    for (uint64_t y = 0; y < rows; y++) std::memcpy(blocks + y * row, src + y * stride, row);
+    return prompt_tex_recognised(blocks);
+}
 
 /// One side of a copy: the texture's level, layers (or 3D slices), and the region of it in texels
 struct Sub {
@@ -196,7 +218,7 @@ void copy_b2t(VkCommandBuffer cmd, NvnState& st, const nvn_p_copy_bt& p, bool to
                  p.r.yoffset, st.copy_stride);
         }
     }
-    if (to_image && p.tex && (!b2t_gpu || astc)) {
+    if (to_image && p.tex && (!b2t_gpu || astc || keytex_copy(p, st.copy_stride))) {
         uint64_t avail = 0;
         const uint8_t* src = host->gpu_ptr(p.buf, &avail);
         if (src) {

@@ -86,5 +86,5 @@ tag starts from it. The workflow's "Play profile" step prints what the profile g
 
 The launcher has its own: `RELINK_LATEST_TAG=<tag>` (or `none`) stands in for GitHub's answer, `RELINK_NO_SEARCH=1` skips the
 search for `.nup` files, `RELINK_LANG=fr|en` chooses its language, and
-`ReLink.exe --snapshot out.png --view install|build|update|ready|problem|home|home-update|smooth|game|controls|playing`
+`ReLink.exe --snapshot out.png --view install|build|update|ready|problem|home|home-update|home-mods|smooth|game|controls|playing`
 writes a picture of one page without running anything.

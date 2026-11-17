@@ -12,6 +12,7 @@
 #include "../gpu/vk/vk_api.h"
 #include "../gpu/vk/oot_wheel_state.h"   /* (relink: the item wheel's state, MKWVK_WHEEL_QUERY) */
 #include "../gpu/vk/dlss_math.h"
+#include "prompts.h"   /* (relink: hos_prompts_announce) */
 
 /* the WebGPU renderer (gpu/render, renamed) */
 int wgr_start(void *hwnd);
@@ -301,6 +302,7 @@ int rx_start(void *hwnd) {
             vk = r;
             hos_log("rx: renderer: %s (%s)", eden ? "Eden's" : "Vulkan", dll);
             flush_early();
+            hos_prompts_announce();   /* (relink: the button font's family, when the game opened it already: prompts.c) */
             return 1;
         }
         if (r) hos_log("rx: the Vulkan back end could not start on the window: WebGPU");

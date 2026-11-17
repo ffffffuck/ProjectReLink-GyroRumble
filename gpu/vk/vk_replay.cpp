@@ -3254,6 +3254,69 @@ void teleport_capture(VkCommandBuffer cmd, VkImage src, uint32_t sw, uint32_t sh
     tp_shot.pending = want, tp_shot.value = value;
 }
 
+// (relink) F12's screenshot (vk_screenshot.h): the picture this present shows, whole and at its own size (the game's output
+// resolution: before the window's scaling, the Insert menu and the FPS counter), copied with the present's recording and
+// handed to the menu's writer at a later present, once the GPU is past it (never waited for). Its image and buffer live
+// only that long: a 3840x2160 picture is 33 MB of each
+struct ScreenShot {
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation image_alloc = nullptr;
+    VkBuffer buf = VK_NULL_HANDLE;
+    VmaAllocation buf_alloc = nullptr;
+    void* map = nullptr;
+    uint32_t w = 0, h = 0;
+    bool pending = false;
+    uint64_t value = 0;
+};
+ScreenShot screen_shot;
+void screenshot_capture(VkCommandBuffer cmd, VkImage src, uint32_t sw, uint32_t sh, const int crop[4], uint64_t value) {
+    ScreenShot& s = screen_shot;
+    if (s.pending) {
+        if (completed() < s.value) return;
+        const size_t bytes = (size_t)s.w * s.h * 4;
+        invalidate_mapped(s.buf_alloc, bytes);
+        std::vector<uint8_t> px((const uint8_t*)s.map, (const uint8_t*)s.map + bytes);
+        menu_store_screenshot(std::move(px), s.w, s.h);
+        destroy_image(s.image, s.image_alloc);
+        destroy_buffer(s.buf, s.buf_alloc);
+        s = ScreenShot{};
+        return;
+    }
+    if (!src || !sw || !sh || !menu_take_screenshot_request()) return;
+    const bool cropped = crop && crop[2] > 0 && crop[3] > 0;
+    s.w = cropped ? (uint32_t)crop[2] : sw, s.h = cropped ? (uint32_t)crop[3] : sh;
+    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.imageType = VK_IMAGE_TYPE_2D;
+    ci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ci.extent = {s.w, s.h, 1};
+    ci.mipLevels = ci.arrayLayers = 1;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (!create_image(ci, s.image, s.image_alloc)) {
+        logf("vk: screenshot: no %ux%u image could be made", s.w, s.h);
+        s = ScreenShot{};
+        return;
+    }
+    if (!create_buffer((uint64_t)s.w * s.h * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, s.buf, s.buf_alloc, &s.map)) {
+        logf("vk: screenshot: no buffer for a %ux%u picture could be made", s.w, s.h);
+        destroy_image(s.image, s.image_alloc);
+        s = ScreenShot{};
+        return;
+    }
+    image_barrier(cmd, s.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    blit_crop(cmd, src, sw, sh, cropped ? crop : nullptr, s.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, s.w, s.h);
+    image_barrier(cmd, s.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    const VkBufferImageCopy c{0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {s.w, s.h, 1}};
+    vkCmdCopyImageToBuffer(cmd, s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s.buf, 1, &c);
+    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};   // (the copy seen by the host's read at a later present)
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, mb.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = 1, di.pMemoryBarriers = &mb;
+    vkCmdPipelineBarrier2(cmd, &di);
+    s.pending = true, s.value = value;
+}
+
 void do_present(const nvn_tex* t, const int crop[4]) {
     // (relink) NVIDIA Reflex (vk_reflex.cpp): this frame's simulation ended, its submission starts; on the way out (after the
     // present) the driver's sleep until the next frame should begin
@@ -3425,6 +3488,7 @@ void do_present(const nvn_tex* t, const int crop[4]) {
         // (relink, RX_VK_WB_LAZY) this frame's share of the write-backs that were put off: with this recording's own
         // (a thirtieth of the pages, ~3 MB), or RX_VK_WB_LAZY_OWN=1: in a recording of its own after it, below
         teleport_capture(r.cmd, src, sw, sh, crop, value);   // (relink: the Travel page's own pictures)
+        screenshot_capture(r.cmd, src, sw, sh, crop, value);   // (relink: F12)
         const bool wb_flush = memory_wb_pending();
         if (wb_flush && !memory_wb_flush_own()) memory_wb_flush_queue();
         memory_end_submission(r.cmd);
@@ -3649,8 +3713,11 @@ void do_present(const nvn_tex* t, const int crop[4]) {
         }
         log_frame_stats();
     }
-    if (dev.offscreen || interpolated) return;
+    // (relink: presents_shown, host/nn_vi.c's pace for HOS_FPS_CAP: counted once the display took the frame, or at once
+    // when nothing waits for a display: no window, or the made frames' own display thread)
+    if (dev.offscreen || interpolated) { presents_shown.fetch_add(1, std::memory_order_release); return; }
     present_image(src, sw, sh, crop, direct_view);
+    presents_shown.fetch_add(1, std::memory_order_release);
 }
 
 } // namespace
@@ -3808,6 +3875,7 @@ std::atomic<uint32_t> present_kind{0};   // (vk_framegen.cpp: 1 while a made fra
 // the swapchain had no image free, twice a frame with frame interpolation.
 std::mutex present_image_mu;
 
+static bool present_one(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkImageView view, bool first_of_frame);
 void present_image(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkImageView view) {
     std::lock_guard lk(present_image_mu);
     if (const uint64_t want = dev.swap_resize.exchange(0, std::memory_order_acquire)) {   // (the window was resized: main's resize)
@@ -3825,6 +3893,14 @@ void present_image(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkI
                                 dev.swap_extent.height);
     }
     menu_tick();
+    // (relink) The "30, smooth" frame rate (low_cap_repeats, vk_main.cpp): the game's frame presented that many times on the
+    // vsynced swapchain, each present one refresh, so every frame is on screen for the same time (D3D's sync interval 2). The
+    // acquires of the repeats wait for the display, which is what paces the replay, and through presents_shown the game
+    const int repeats = src && present_kind.load() == 0 ? low_cap_repeats() : 1;
+    for (int rep = 0; rep < repeats; rep++)
+        if (!present_one(src, sw, sh, crop, view, rep == 0)) break;
+}
+static bool present_one(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkImageView view, bool first_of_frame) {
     Frame& f = frames[frame_index];
     const int log_slot = frame_index;
     frame_index = (frame_index + 1) % 3;
@@ -3846,7 +3922,7 @@ void present_image(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkI
     if (res == VK_TIMEOUT || res == VK_NOT_READY) {
         if (!unseen) logf("vk: the window is not shown (no image back in 100 ms): frames are not shown until it is");
         unseen = true;
-        return;
+        return false;
     }
     if (unseen && (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR)) {
         unseen = false;
@@ -3856,9 +3932,9 @@ void present_image(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkI
     if (res == VK_ERROR_OUT_OF_DATE_KHR) {
         std::lock_guard qk(dev.present_mu);
         create_swapchain(dev.swap_extent.width, dev.swap_extent.height);
-        return;
+        return false;
     }
-    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) return;
+    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) return false;
     vkResetFences(dev.device, 1, &f.done);
     vkResetCommandPool(dev.device, f.pool, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -3886,7 +3962,7 @@ void present_image(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkI
         const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         vkCmdClearColorImage(f.cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
     }
-    if (src && framelog_on()) {
+    if (first_of_frame && src && framelog_on()) {
         static uint32_t seq;
         LogSlot& l = log_slots[log_slot];
         image_barrier(f.cmd, log_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -3962,7 +4038,7 @@ void present_image(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkI
         static FILE* fl = getenv("RX_VK_FRAME_LOG") ? std::fopen(getenv("RX_VK_FRAME_LOG"), "w") : nullptr;
         static std::chrono::steady_clock::time_point first, prev;
         static uint64_t frames;
-        if (fl) {
+        if (fl && first_of_frame) {   // (relink: a game frame's first present only: its repeats are the display's, not the game's)
             const auto t = std::chrono::steady_clock::now();
             if (!frames) first = prev = t, std::fputs("frame,time_s,frametime_ms\n", fl);
             std::fprintf(fl, "%llu,%.4f,%.3f\n", (unsigned long long)frames, std::chrono::duration<double>(t - first).count(),
@@ -3974,7 +4050,9 @@ void present_image(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkI
     if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR) {
         if (!qk.owns_lock()) qk.lock();
         create_swapchain(dev.swap_extent.width, dev.swap_extent.height);
+        return false;
     }
+    return res >= 0;
 }
 
 
@@ -4517,8 +4595,11 @@ void fill_replay_table(MkwVkRenderer& t) {
         if (id == OOT_CHEAT_AGE_ID) return menu_link_age();
         if (id >= OOT_CHEAT_ITEM_BASE && id < OOT_CHEAT_ITEM_BASE + 4096) return menu_item_count(id - OOT_CHEAT_ITEM_BASE);
         if (id == HOS_OPT_TELEPORT_PICTURES) return menu_teleport_captures_on();   // (relink: host/hos_main.c oot_capture_tick)
+        if (id == HOS_OPT_LOW_CAP_MFPS) return low_cap_repeats() > 1 ? low_cap_mfps.load(std::memory_order_relaxed) : 0;
+        if (id == HOS_OPT_FOV) return opts.fov;   // (relink: host/nn_vi.c, nx2/oot_fov.py)
+        if (id == HOS_OPT_PRESENTS_SHOWN) return presents_shown.load(std::memory_order_acquire) & 0x3fffffff;   // (relink: host/nn_vi.c)
         return id == 0 ? opts.realtime : id == 1 ? menu_is_open() : id == 2 ? resolution_auto() && !dlss_full_scale() : id == 3 ? (dlss_full_scale() ? 10000 : resolution_scale()) : id == 4 ? opts.pad_background : id == 5 ? opts.text_speed : id == 6 ? opts.mouse_native :
-               id == 7 ? opts.mouse_sens : id == 8 ? opts.mouse_invert : id == 9 ? opts.rumble : id == 16 ? opts.invert_cam_x : id == 17 ? opts.invert_cam_y : id == HOS_OPT_GYRO ? opts.gyro : id == HOS_OPT_GYRO_SENS_X ? opts.gyro_sens_x : id == HOS_OPT_GYRO_SENS_Y ? opts.gyro_sens_y : id == HOS_OPT_GYRO_INV_X ? opts.gyro_inv_x : id == HOS_OPT_GYRO_INV_Y ? opts.gyro_inv_y :
+               id == 7 ? opts.mouse_sens : id == 8 ? opts.mouse_invert : id == 9 ? opts.rumble : id == HOS_OPT_DEADZONE_L ? opts.deadzone_l : id == HOS_OPT_DEADZONE_R ? opts.deadzone_r : id == 16 ? opts.invert_cam_x : id == 17 ? opts.invert_cam_y : id == HOS_OPT_GYRO ? opts.gyro : id == HOS_OPT_GYRO_SENS_X ? opts.gyro_sens_x : id == HOS_OPT_GYRO_SENS_Y ? opts.gyro_sens_y : id == HOS_OPT_GYRO_INV_X ? opts.gyro_inv_x : id == HOS_OPT_GYRO_INV_Y ? opts.gyro_inv_y :
                id == HOS_OPT_DLSS_JITTER_W || id == HOS_OPT_DLSS_JITTER_H ? (int)dlss_jitter_size(id - HOS_OPT_DLSS_JITTER_W) :
                id == HOS_OPT_DLSS_JITTER_PHASES ? (int)dlss_jitter_size(2) : 0;
     };

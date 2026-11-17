@@ -59,7 +59,8 @@ start, unless `RX_VK_LEAN_PIPELINES=0` in `relink_env.txt` brings back the older
 
 - 64-bit Windows 10 or 11, and a CPU with AVX2.
 - A graphics card with Vulkan 1.3 and mesh shaders, with an up-to-date driver: NVIDIA GeForce RTX 20 series or newer, AMD
-  Radeon RX 6000 series or newer, Intel Arc. We only tested on NVIDIA.
+  Radeon RX 6000 series or newer, Intel Arc. We only tested on NVIDIA. Since 0.7.9 a card without mesh shaders (GeForce GTX
+  10 series) gets a picture too, as an experiment: about half the frame rate, and some large rocks missing.
 - 8 GB of video memory recommended, 16 GB of RAM or more.
 - About 60 GB free while it installs, and an internet connection for the download.
 
@@ -79,7 +80,9 @@ folder, from the game files the folder keeps: your `.nup` is not needed again. S
 The launcher sets the display (full screen, 3D render resolution, upscaling, sharpness, ultrawide), the smoothness (60
 frames a second or unlocked, frame generation), the game's language and the controls. It can put the display at 60 Hz while
 you play, so that every frame lasts the same time on a 100 or 144 Hz display, and puts the display's own rate back
-afterwards. In the game, **Insert** or **F1** opens the same menu, and **F11** switches full screen.
+afterwards. In the game, **Insert** or **F1** opens the same menu, **F11** switches full screen, and **F12** saves a
+screenshot: the game's picture at its output resolution, without the menu or the FPS counter, as a PNG in the game folder's
+`screenshots` folder (a line over the game says where).
 
 **Upscaler** (since 0.7): what scales the 3D up to the screen. The game's own network by default; **AMD FSR 3.1** on any
 graphics card (AMD's library comes with ReLink); or **NVIDIA DLSS / DLAA** on an RTX card, after turning on **NVIDIA DLSS** on
@@ -107,6 +110,25 @@ ZR; +Bombs the bombs too; +Tools the hookshot, hammer, slingshot and boomerang t
 `HOS_ITEM_WHEEL=0` or `1` and `HOS_CYCLE_ITEMS=0` to `4` in `relink_env.txt` stand
 in for the two rows.
 
+**30, smooth** (launcher, Smoothness tab, Frames per second): for PCs that do not hold 60. Every frame stays on screen for
+the same number of refreshes (2 on a 60 or 120 Hz display), with vsync, and the game waits for the display before it starts
+the next frame, so the 30 frames are even instead of swinging between 16 and 50 ms. Game time follows the clock. On a 144 Hz
+display each frame is held 5 refreshes (28.8 fps). `HOS_FPS_CAP=<20-59>` in `relink_env.txt` sets another cap the same way.
+
+**Field of view** (Insert menu, Graphics, 70 to 150 %): the camera's angle in percent of the game's own; the culling follows
+it. `HOS_FOV=<percent>` in `relink_env.txt` stands in for the row.
+
+**Left / Right stick dead zone** (Insert menu, Controls, 0 to 50 %, 24 by default, as before): raise it if Link walks or the
+camera turns on its own (stick drift). The dead zone is round now (a diagonal push near the centre is no longer cut on one
+axis) and what is past it starts just past the game's own dead zone. `HOS_STICK_DEADZONE_L` / `_R=<percent>` stand in for
+the rows.
+
+**ReShade and RenoDX**: ReLink renders through Vulkan, so ReShade must be installed with its Vulkan API and add-on support for
+`relink-game.exe` (in the game folder's `bin`). When ReShade's layer is loaded the game keeps its presents on the graphics queue
+and makes the swapchain's images drawable, which ReShade's effects and RenoDX's HDR output need (`RX_VK_RESHADE=1` forces this,
+`0` turns it off). A RenoDX mod for this game still has to be written for its shaders: ReLink only removes what stopped
+ReShade from drawing.
+
 **Travel** (on the Cheats page: `HOS_OOT_CHEATS=1` in `relink_env.txt` shows the Gameplay tab's **Cheats** row, and
 Travel is that page's last row): a page of 190 places to go to, villages, dungeons' entrances, shops, warp points and story spots,
 grouped by area, for Link's age (Tab or X shows the other age's: going there makes Link that age). Once you have opened the
@@ -114,6 +136,17 @@ page, each place gets a picture taken from your own game the first time Link sta
 (in `teleport_pictures` in the game folder); Y or Backspace on the page takes a place's picture
 again at the next stay there. Link arrives through the game's own map change, as when he walks in. The places' positions
 and arrival events come from your game files at every build (`teleport_places.bin`, `nx2/teleport_places.py`).
+
+**Button prompts** (Controls, Nintendo by default): the buttons the game's prompts show, Nintendo's, Xbox's (A, B, X, Y, LB,
+RB, LT, RT, Menu, View) or PlayStation's (cross, circle, square, triangle, L1, R1, L2, R2, Options, Create). Each prompt
+shows the button that presses it, so the letters follow the **Layout preset** and your own bindings: with the Nintendo
+preset, the Switch's A is the right-hand button and shows Xbox's B. The labels are ReLink's own drawings, which every build
+adds to a copy of your game's button font in the `prompts` folder. The three faded letters around the HUD's action
+button, which are pictures and not letters of the font, follow too: the renderer puts ReLink's own labels in their place
+(`prompts\keytex.bin`, made by every build). It applies the next time the game starts. Not changed yet: the ocarina's
+note buttons, pictures as well, keep the Switch's; and the font has one colour, so the prompts are not coloured. A mod
+that replaces the button font wins over this row, and the faded letters then stay the Switch's too.
+`HOS_BUTTON_PROMPTS=0`, `xbox` or `playstation` in `relink_env.txt` stands in for it.
 
 ## Measured frame rates
 
@@ -182,27 +215,67 @@ at arrivals. The shaders are prepared again at the first start after this update
 Not reached or not measured yet: a steady 60 everywhere (the Market stays below, and so do a few places at native
 resolution), boss fights, sessions longer than half an hour, and AMD and Intel cards.
 
-## If the game slows down with adult Link: check your dump
+## Black cliffs, blurry rocks, missing models, a slow adult Link: check your dump
 
-Some dumps hold a few damaged textures. The game then never finishes loading the model that needs one: the fairy fountains'
-floor and walls are not drawn, and as an adult the model is loaded again and again for ever, which keeps more than one CPU
-core busy. Since 0.7.2 every install and update does the repair below by itself (the mod `mods\00-dump-repair` in the game
-folder). Two tools in this repository deal with it, from your own files (nothing of the game is in them):
+Some dumps hold damaged texture files: their first kilobytes are zeros, as the dumper read them. Which files, and how
+many, differs from one dump to another (ours has 3 of 20,667). The game cannot read such a file, and what it does then
+depends on what the file was:
+
+- a piece of an area's baked lighting (`RBake_Scene_...`): everything it lights is drawn **black** (a whole cliff side);
+- a texture of a model: the model **never finishes loading**. Rocks and walls are missing and the smooth, blurry ground
+  under them shows instead; and the game loads the model again and again for ever, which keeps more than one CPU core
+  busy (the fairy fountains as an adult: frames lost everywhere).
+
+Every install and update checks the dump and writes a small mod, `mods\00-dump-repair` in the game folder, that stands in
+for the damaged files (since 0.7.2 for two files it knew by name; since 0.7.9 for every damaged texture it finds). A
+stand-in is an intact relative of the same kind and size from your own files, under the damaged file's name: the same
+piece of lighting of the other age (child for adult), or the nearest texture of the same family. It is a relative, not
+the real texture: lighting from the other age can be a little off, and a piece whose relative has another layout stays
+partly dark. `mods\00-dump-repair\README.txt` lists what was damaged, what stands in for it, and what has no stand-in.
+Only a new dump of the game brings the real files back.
+
+Two tools in this repository do it by hand, from your own files (nothing of the game is in them):
 
 ```powershell
 python -I tools/dump_check.py "C:\Games\ReLink\romfs\Tex"
 python -I tools/dump_repair.py "C:\Games\ReLink\romfs" "C:\Games\ReLink\mods\00-dump-repair"
 ```
 
-The first counts the damaged files; the second writes a small mod that stands in for the ones it knows with an intact
-texture of the same family. They need the `zstandard` package, which ReLink's own Python has
+The first counts the damaged files; the second writes the mod, and needs no rebuild: the game reads mods when it starts.
+They need the `zstandard` package, which ReLink's own Python has
 (`%LOCALAPPDATA%\ReLink\versions\<version>\ReLink\tools\python\python.exe`).
 
 ## Mods
 
 RomFS mods go in `mods\<name>\romfs\...` in the game folder, with the same paths as the game's. The log
-(`relink_log.txt`) names each mod it reads. Patches of the game's code (`exefs`) are not supported: the code is compiled
-ahead of time.
+(`relink_log.txt`) names each mod it reads. A mod may sit deeper, as emulators keep them (`mods\contents\<title id>\<name>`),
+a folder whose name starts with `-` or `_` is off, and when two mods have the same file the one whose path sorts last wins
+(name them `01-...`, `02-...`).
+
+Patches of the game's code go in `mods\<name>\exefs\`, in the two formats emulators read:
+
+- `<build id>.ips`, IPS32 or IPS, applied to the module whose build id is the file's name (the game's `main` is
+  `E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348`);
+- `*.pchtxt`, the text patches that name their module with `@nsobid-<build id>` (with `@flag offset_shift`, `@enabled`,
+  `@disabled`, `@stop`, `@flag be`, comments, hex values and `"strings"`).
+
+ReLink translates the game's code when it builds the game, so these patches are applied then, to a copy of the code before
+it is translated: **after adding, changing or removing one, build the game again** (the launcher's first page says
+*Exefs mods changed since the last build* and offers *Build again*; the game says it too at its start). Your own copy of the
+game is never changed. `relink_exefs_mods.txt` in the game folder lists what the last build applied or left out, and why.
+
+- Patches made for another version of the game (another build id) are left out, and so is a patch that writes outside the
+  module's code and data. When two mods write different bytes at the same place, the one whose path sorts last wins.
+- Not supported: replacement module files (a whole `main` or `subsdk` in `exefs`), and patches of `rtld`.
+- Code a patch adds in unused space of the code ("code caves") is translated when the game's code branches to it (`b`,
+  `bl`, conditional branches), or when a pointer in the data or an `adr`/`adrp` outside the game's own functions holds its
+  address; code reached only through a pointer made some other way is not, and the build says so (*not translated* in
+  `relink_exefs_mods.txt`).
+- A patch changes the translated code, so one of ReLink's own fixes or options in the same function may not apply any more:
+  the build says which (*warning* lines), and stops with a message naming the patch when it is in the way of the output
+  resolution, which cannot be half applied. Where a patch changes one of the two game functions ReLink runs natively (its
+  zstd decoding and its name searches), the native version is left out and the patched code runs; a patch of a system
+  function ReLink provides itself (`nn::` services, the graphics driver) has no effect. The build lists both.
 
 ## Build from source
 
@@ -274,9 +347,22 @@ en roue au lieu de la rangée du jeu ; visez-en un au stick et relâchez pour le
 pages, Y déplace un objet. **Cycle items** change l'objet de ZR d'un appui bref sur R ou L. Le même onglet a une ligne
 **Quit game**, qui demande confirmation puis ferme le jeu.
 
+**Button prompts** (onglet Controls du menu Insert) : les boutons affichés par le jeu sont ceux d'une manette Xbox ou
+PlayStation, dessinés par ReLink, et suivent le **Layout preset** et vos propres assignations ; le réglage s'applique au
+prochain démarrage du jeu. Les trois lettres pâles autour du bouton d'action du HUD, qui sont des images, suivent aussi
+(ReLink met ses propres dessins à leur place, `prompts\keytex.bin`). Les notes de l'ocarina, des images elles aussi,
+gardent les lettres de la Switch, et la police n'a qu'une couleur.
+
+**Depuis la 0.7.9** : **30, smooth** (lanceur, onglet Smoothness, Frames per second) garde chaque image à l'écran le même
+temps sur les PC qui ne tiennent pas 60 ; **Field of view** (menu Insert, Graphics, 70 à 150 %) règle l'angle de la caméra et
+**Left / Right stick dead zone** (Controls, 0 à 50 %) la zone morte des sticks ; **F12** enregistre l'image du jeu en PNG
+dans le dossier `screenshots` du jeu ; les patchs de code des mods (`mods\<nom>\exefs\`, formats IPS et pchtxt) sont
+appliqués quand le lanceur reconstruit le jeu (**Build again**).
+
 Il faut Windows 10 ou 11 en 64 bits, un processeur avec AVX2, une carte graphique avec Vulkan 1.3 et les mesh shaders
 (GeForce RTX 20 ou plus récente, Radeon RX 6000 ou plus récente, Intel Arc ; nous n'avons testé que sur NVIDIA), 16 Go de RAM
-et environ 60 Go libres pendant l'installation.
+et environ 60 Go libres pendant l'installation. Depuis la 0.7.9, une carte sans mesh shaders (GeForce GTX 10) obtient aussi
+une image, à titre expérimental : environ la moitié des images par seconde, et de gros rochers absents.
 
 Le premier démarrage est long, une seule fois (environ 16 minutes sur notre PC) : le jeu prépare ses shaders, construit ses
 pipelines graphiques pour le cache du pilote et fabrique les pipelines de calcul dont on sait que le jeu se sert, avec un
