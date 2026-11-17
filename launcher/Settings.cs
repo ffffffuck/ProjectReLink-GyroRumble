@@ -125,7 +125,7 @@ sealed class Settings
         FrameGeneration = Int(g, "frame_generation", 0, 0, 4);
         if (FrameGeneration == 1) FrameGeneration = 2;
         FramePacing = Int(g, "frame_pacing", 0, 0, 1);
-        FrameRate = Int(g, "frame_rate", 0, 0, 1);
+        FrameRate = Int(g, "frame_rate", 0, 0, 2);   // (2: 30, smooth: HOS_FPS_CAP=30)
         // (the game's Render resolution row: 0 Auto, 1..6 = 100 %, 75 %, 67 %, 50 %, 58 %, 33 % of the output; 1, native, by default)
         Resolution = Int(g, "resolution", 1, 0, 6);
         Upscaling = Int(g, "upscaling", 0, 0, 2);

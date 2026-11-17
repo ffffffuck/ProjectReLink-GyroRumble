@@ -21,6 +21,7 @@
 #include <windows.h>
 #include "hos_sdl.h"
 #include "hos_motion.h"
+#include "hos_stick.h"
 #include "../gpu/vk/vk_api.h"   /* (HOS_PAD_*) */
 
 void hos_host_thread_register_self(const char *name);   /* hos_prof.c */
@@ -62,10 +63,10 @@ static HosMotionSample motion_hist[HOS_MOTION_HISTORY];
 static int motion_head, motion_count, motion_live;
 static volatile LONG gyro_status;   /* 0 no controller, 1 controllers but none with a gyro, 2 one with a gyro */
 
-static int32_t stick_value(int16_t v, int flip) {
-    int32_t a = v < -32767 ? -32767 : v;
-    if (flip) a = -a;
-    return (a > 7849 || a < -7849) ? a : 0;   /* XInput's dead zone, as nn_hid.c uses */
+/* (one axis of a stick past its dead zone, host/hos_stick.h, turned around when asked) */
+static int32_t stick_value(int32_t v, int flip) {
+    int32_t a = v < -32767 ? -32767 : v > 32767 ? 32767 : v;
+    return flip ? -a : a;
 }
 
 /* SDL's controller support started; 0 when it could not be */
@@ -254,6 +255,7 @@ static void pads_poll(void) {
         int count = 0;
         int rx_option(int id, int otherwise);
         const int strength = rx_option(9, 100);   /* (the menu's Rumble strength) */
+        const int dz_left = hos_stick_deadzone_percent(0), dz_right = hos_stick_deadzone_percent(1);
         uint16_t motors[2];
         rumble_strength((uint16_t)rumble_low, (uint16_t)rumble_high, strength, motors);
         const uint16_t lo = motors[0], hi = motors[1];
@@ -267,8 +269,10 @@ static void pads_poll(void) {
             if (hos_sdl_pad_axis(gc, AX_RT) > 8000) b |= 1ULL << HOS_PAD_RTRIGGER;
             const int inv_x = rx_option(16, 0);
             const int inv_y = rx_option(17, 0);
-            const int32_t v[4] = {stick_value(hos_sdl_pad_axis(gc, AX_LX), 0), stick_value(hos_sdl_pad_axis(gc, AX_LY), 1),
-                                  stick_value(hos_sdl_pad_axis(gc, AX_RX), inv_x), stick_value(hos_sdl_pad_axis(gc, AX_RY), inv_y ? 0 : 1)};
+            int32_t l[2], r[2];   /* (round dead zones, the Controls tab's: host/hos_stick.h) */
+            hos_stick_apply(hos_sdl_pad_axis(gc, AX_LX), hos_sdl_pad_axis(gc, AX_LY), dz_left, l);
+            hos_stick_apply(hos_sdl_pad_axis(gc, AX_RX), hos_sdl_pad_axis(gc, AX_RY), dz_right, r);
+            const int32_t v[4] = {stick_value(l[0], 0), stick_value(l[1], 1), stick_value(r[0], inv_x), stick_value(r[1], inv_y ? 0 : 1)};
             for (int k = 0; k < 4; k++)
                 if ((v[k] < 0 ? -v[k] : v[k]) > (s[k] < 0 ? -s[k] : s[k])) s[k] = v[k];
             {   /* (motion: the pad last used; a stick counts by which way it is pushed, not by how far) */

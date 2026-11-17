@@ -86,12 +86,13 @@
     },
     {
       "id": "frame_rate", "label": "Frame rate", "group": "Smoothness", "in": "env",
-      "help": "60 is the game's own rate. Unlocked goes up to your display's refresh; the game keeps time by the clock, so it plays at the same speed.",
+      "help": "60 is the game's own rate. Unlocked goes up to your display's refresh; the game keeps time by the clock, so it plays at the same speed. 30, smooth is for PCs that do not hold 60: every frame stays on screen for the same time.",
       "choices": [
-        { "label": "60", "set": { "HOS_FPS_UNLOCKED": "0" } },
-        { "label": "Unlocked", "set": { "HOS_FPS_UNLOCKED": "1" } }
+        { "label": "60", "set": { "HOS_FPS_UNLOCKED": "0", "HOS_FPS_CAP": "0" } },
+        { "label": "Unlocked", "set": { "HOS_FPS_UNLOCKED": "1", "HOS_FPS_CAP": "0" } },
+        { "label": "30, smooth", "set": { "HOS_FPS_UNLOCKED": "0", "HOS_FPS_CAP": "30" } }
       ],
-      "defaults": { "HOS_FPS_UNLOCKED": "0" }
+      "defaults": { "HOS_FPS_UNLOCKED": "0", "HOS_FPS_CAP": "0" }
     },
     {
       "id": "frame_generation", "label": "Frame generation", "group": "Smoothness",

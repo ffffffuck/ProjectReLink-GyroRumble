@@ -237,7 +237,8 @@ def clock(seconds):
     return "%d:%02d:%02d" % (s // 3600, s // 60 % 60, s % 60)
 
 
-def run(cmd, env=None, on_line=None, check=True, output=None):
+def run(cmd, env=None, on_line=None, check=True, output=None, plain_stop=None):
+    """plain_stop: a file the step writes its reason to stop in, said as it is when it stops (the lift's exefs mods conflict)"""
     e = dict(os.environ, PYTHONIOENCODING="utf-8")
     e.update(env or {})
     p = subprocess.Popen(cmd, cwd=ROOT, env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
@@ -252,6 +253,9 @@ def run(cmd, env=None, on_line=None, check=True, output=None):
             on_line(line)
     p.stdout.close()
     code = p.wait()
+    if code and check and plain_stop and os.path.isfile(plain_stop):
+        with open(plain_stop, encoding="utf-8") as f:
+            fail(f.read().strip())
     if code and check:
         step = next((os.path.basename(c) for c in cmd[1:] if c.endswith(".py")), os.path.basename(cmd[-1]))   # (issue 154: not "-u")
         status = "signal %d" % -code if os.name == "posix" and code < 0 else "exit status %d" % code
@@ -288,14 +292,21 @@ def check_supported_build(exefs):
 ROMFS_TABLE = "ResourceSizeTable.Product.111.Nin_Ounce_NVN2.rsizetable.zs"   # (the supported version's, in System/Resource)
 
 
-def romfs_problem(romfs):
+def romfs_problem(romfs, nup=None):
     """(issue 26) Why a romfs folder chosen by hand is not the supported game's RomFS, or None. A romfs taken from another PC
     port's folder (a few packed .bin files, no subfolders) was accepted, built for 40 minutes, and the game died in its first
-    second: its own allocator returned null. The game's RomFS has System/Resource/<the table above> and hundreds of folders"""
+    second: its own allocator returned null. The game's RomFS has System/Resource/<the table above> and hundreds of folders.
+    (issue 88) nup: the romfs was read from this .nup file, whose code is the supported build's: a dump with the update's code
+    and the first version's files was built in full, and the game then said at each start that its files are another version's"""
     res = os.path.join(romfs, "System", "Resource")
     if os.path.isfile(os.path.join(res, ROMFS_TABLE)):
         return None
     others = sorted(f for f in os.listdir(res) if f.startswith("ResourceSizeTable")) if os.path.isdir(res) else []
+    if nup:
+        return ("The game files in %s are %s (ReLink needs the version whose files have System\\Resource\\%s), while its code is "
+                "the supported version's. The game's code and files must be from the same version: dump the game again with its "
+                "update applied to the whole game, files included, and choose that dump."
+                % (nup, "from another version of the game (%s)" % others[0] if others else "not the game's own RomFS", ROMFS_TABLE))
     if others:
         return ("The romfs folder %s is from another version of the game (%s). ReLink needs the version whose romfs has "
                 "System\\Resource\\%s: dump the game with its update applied, and use that romfs with the exefs from the same "
@@ -889,6 +900,8 @@ def lift_key(exefs, work, env):
     h.update(" ".join(sorted(standalone.implemented())).encode())
     # (each file named from its own base: the exefs and the work folder may be on another drive than the source, which relpath refuses)
     files = [(exefs, os.path.join(exefs, f)) for f in sorted(os.listdir(exefs))]
+    if env.get("OOT_EXEFS_PATCHES"):   # (exefs mods: which patch changed which bytes, for the lift's lines; none without them)
+        files.append((os.path.dirname(env["OOT_EXEFS_PATCHES"]), env["OOT_EXEFS_PATCHES"]))
     for top in (HERE, os.path.join(ROOT, "third_party", "a64-kit")):
         for d, dirs, fs in os.walk(top):
             dirs[:] = sorted(x for x in dirs if x != "__pycache__")
@@ -1123,6 +1136,10 @@ def main(a=None):
             check_supported_build(staged_exefs)
             if not os.path.isdir(os.path.join(game, "romfs")):
                 fail("The package did not contain a romfs folder.")
+            why = romfs_problem(os.path.join(game, "romfs"), nup=a.nup)   # (issue 88: said before anything is built)
+            if why:
+                shutil.rmtree(game, ignore_errors=True)
+                fail(why)
             if os.path.exists(romfs):
                 shutil.rmtree(romfs)
             shutil.move(os.path.join(game, "romfs"), romfs)
@@ -1144,6 +1161,18 @@ def main(a=None):
         shutil.rmtree(kept, ignore_errors=True)
         shutil.copytree(exefs, kept)
     check_supported_build(exefs)
+    # (exefs mods) the code patches in the folder's mods (nx2/exefs_mods.py), applied to a copy of the modules: every step after
+    # this reads that copy (code), the lift first, so a changed set of patches translates the game again and the same set does
+    # not. The game's own copy (exefs, and .relink_exefs kept in the folder) stays as it is. Without a patch, code is exefs
+    import exefs_mods
+    mods_root = exefs_mods.mods_root(out)
+    try:
+        patched = exefs_mods.prepare(exefs, mods_root, work, say=lambda line: print(line, flush=True))
+    except (OSError, ValueError) as e:
+        fail("The code patches (exefs) in %s could not be applied: %s. Take them out of the mods folder, or put _ before the mod's "
+             "folder name, and build again." % (mods_root, e))
+    code = patched.exefs
+    say("progress", "1")
 
     # (made once on the development PC: lists of addresses and counts, no game code)
     for name in ("hot_funcs.txt", "hot_order.txt", "relink_pieces.prof", "relink_vk.profdata", "relink.res"):
@@ -1156,7 +1185,9 @@ def main(a=None):
     src = os.path.join(ROOT, "work", "image", "chunks.txt")   # (where the lifted code's files begin: addresses)
     if os.path.exists(src):
         shutil.copy2(src, os.path.join(work, "image", "chunks.txt"))
-    env = {"OOT_WORK": work, "OOT_EXEFS": exefs, "OOT_ROMFS": romfs, "OOT_DUMP": out, "RX_RELEASE": "1", "A64_HOT_CHUNK": "1"}
+    env = {"OOT_WORK": work, "OOT_EXEFS": code, "OOT_ROMFS": romfs, "OOT_DUMP": out, "RX_RELEASE": "1", "A64_HOT_CHUNK": "1"}
+    if patched.description:   # (only with patches applied: a build without them has the environment, and so the lift key, it had)
+        env["OOT_EXEFS_PATCHES"] = patched.description
     if os.path.exists(os.path.join(work, "hot_funcs.txt")):
         env["A64_HOT_FUNCS"] = os.path.join(work, "hot_funcs.txt")
     if os.path.exists(os.path.join(work, "relink_pieces.prof")) and profile_readable(os.path.join(work, "relink_pieces.prof")):
@@ -1168,7 +1199,8 @@ def main(a=None):
     say("stage", "lift", "Translating the game to PC code")
     # (the same game, tools and settings as the lift before: its C is what this lift would write, and nothing recompiles from it. A
     # rebuild after a change to host/ alone skips the minutes of the lift)
-    key = lift_key(exefs, work, env)
+    key = lift_key(code, work, env)
+    gen_dir = os.path.join(work, "sa", "gen")
     if lifted_before(work, key):
         print("the game was translated with these tools before: translating it again is skipped", flush=True)
     else:
@@ -1189,7 +1221,10 @@ def main(a=None):
                     except OSError as e:
                         fail("Could not remove earlier translated file %s: %s. The new translation has not started." %
                              (os.path.join(gen_dir, f), e))
-        run(PY + ["nx2/lift.py", "--standalone", "--write", "--exefs", exefs, "--work", work], env)
+        stop = os.path.join(gen_dir, exefs_mods.LIFT_STOP)
+        if os.path.exists(stop):
+            os.remove(stop)
+        run(PY + ["nx2/lift.py", "--standalone", "--write", "--exefs", code, "--work", work], env, plain_stop=stop)
         if os.path.isfile(os.path.join(work, "sa", "gen", "code_hot.c")):
             run(PY + ["nx2/split_hot.py", os.path.join(work, "sa", "gen")], env)   # (eight files side by side: ~6 minutes, not 79)
         write_lift_key(work, key)
@@ -1317,6 +1352,17 @@ def main(a=None):
         except PermissionError:
             fail("Could not replace %s. Close any running copy of ReLink and check that the file and folder are writable, then retry. "
                  "Staged replacements remain beside the installed files; the compiled source remains at %s." % (dst, src))
+    # (exefs mods) what this game was built with, beside it: the hash the game and the launcher compare with the mods folder's
+    # patch files, then a line for each patch applied or left out and what the lift found (nx2/exefs_mods.py). Written only
+    # now, with the new game in place: a build that stopped leaves the old game's record
+    lift_notes = []
+    if patched.description:
+        try:
+            with open(os.path.join(work, "sa", "gen", exefs_mods.LIFT_NOTES), encoding="utf-8") as f:
+                lift_notes = [l.rstrip("\n") for l in f if l.strip()]
+        except OSError:
+            pass
+    exefs_mods.write_report(out, patched, lift_notes)
     if launcher:   # (a folder built before the launcher: its libraries left the folder for bin\; relink is the launcher now)
         stale = [] if LINUX else sorted(f for f in os.listdir(out) if f.endswith(".dll") and f.startswith(("av", "sw")))
         for n in BESIDE + stale + ["relink-game.map", "relink-game.exe"]:
@@ -1332,7 +1378,8 @@ def main(a=None):
         print("the shader list was not made: the game will compile its shaders as it plays", flush=True)
     # (issue 14) Some dumps hold textures whose first kilobytes are zeros; the game cannot decode them and never finishes loading
     # the models that need one: the fairy fountains' floor and walls were not drawn, and as an adult the model was loaded again
-    # and again for good. tools/dump_repair.py writes a small mod that stands in for the ones it knows, from the player's own
+    # and again for good; a damaged piece of an area's baked lighting leaves what it lights black. tools/dump_repair.py finds
+    # every damaged texture and writes a small mod that stands in for those that have an intact relative, from the player's own
     # files; it was a step for the player to run by hand (README), now every build does it. Not worth stopping a build for
     repair = os.path.join(ROOT, "tools", "dump_repair.py")
     if os.path.isfile(repair) and run(PY + [repair, romfs, os.path.join(out, "mods", "00-dump-repair")], check=False,
@@ -1356,6 +1403,12 @@ def main(a=None):
                                        ("wheel_sounds.py", "--out", "sounds.bin", "it is silent")):
         if run(PY + [os.path.join(HERE, script), "--romfs", romfs, opt, os.path.join(wheel, name)], check=False, output=sys.stderr):
             print("the item wheel's %s was not made: %s" % (name, without), flush=True)
+    # (relink, issues 34, 63, 68, 20) the button prompts' fonts: the game's own button font with ReLink's Xbox and PlayStation
+    # labels, and where the host patches them for the bindings (nx2/button_glyphs.py, host/prompts.c). Without them the game
+    # shows the Switch's buttons whatever the Button prompts row says
+    if run(PY + [os.path.join(HERE, "button_glyphs.py"), "--romfs", romfs, "--out", os.path.join(out, "prompts")], check=False,
+           output=sys.stderr):
+        print("the button prompts' fonts were not made: the game shows the Switch's buttons", flush=True)
     language = os.path.join(out, "language.txt")   # (the same text as host/nn_applet.c writes)
     with open(language, "w", encoding="utf-8", newline="\n") as f:
         f.write("# The game's language. Change the line below to one of the codes listed here, save, and start the game again.\n\n%s\n\n" % a.language)
@@ -1379,6 +1432,7 @@ def main(a=None):
     # changed; the builder says how much stays and lets it go. Kept in a development checkout)
     if os.path.normcase(work) != os.path.normcase(os.path.abspath(os.path.join(ROOT, "work"))):
         shutil.rmtree(exefs, ignore_errors=True)
+        shutil.rmtree(os.path.join(work, exefs_mods.COPY), ignore_errors=True)   # (the patched copy, made again by every build)
         # (players asked for the space back: the translated code and the compiled objects (4 GB and more) go too once the game is
         # ready, on Windows and Linux alike. The next update translates and compiles again, about as long as a first build.
         # RELINK_KEEP_BUILD_FILES=1 keeps them for quick updates, as before)

@@ -113,13 +113,28 @@ def coverage(L, img, out_dir):
     return total
 
 
-def edit_c(gen, stats, supported, whole=True):
+def edit_c(gen, stats, supported, whole=True, modded=None, notes=None):
     """The edits of the written C, in this order: the game's patches (nx2/oot_patches.py, which find the lift's exact text; the
     supported build's whole standalone lift fails when an output-size edit finds no place), then, last, the page marks of each
-    group of stores shared (a64_lift.group_marks), which changes that text. stats: the lift's, for its report"""
+    group of stores shared (a64_lift.group_marks), which changes that text. stats: the lift's, for its report. modded, notes:
+    the functions exefs mods change and the list their lines go to (nx2/exefs_mods.py)"""
     import oot_patches
-    oot_patches.apply(gen, protect_hearts=supported, required=supported and whole)
+    oot_patches.apply(gen, protect_hearts=supported, required=supported and whole, modded=modded, notes=notes)
     a64_lift.group_marks(sorted(glob.glob(os.path.join(gen, "code_*.c"))), stats)
+
+
+def exefs_sites():
+    """{ReLink's lift-time change: [the guest addresses whose instruction it checks]} (nx2/oot_wide.py and the others)"""
+    import oot_wide
+    import oot_jitter
+    import oot_occlusion
+    import oot_fov
+    import oot_step_rate
+    return {"widescreen": [oot_wide.MAIN + s[0] for s in oot_wide.SITES],
+            "camera jitter (DLSS, FSR)": [oot_wide.MAIN + s[0] for s in oot_jitter.SITES],
+            "Occlusion Off": [oot_occlusion.MAIN + o for o in oot_occlusion.OFFSETS],
+            "field of view": [oot_fov.MAIN + oot_fov.SITE],
+            "the frame rate above 60 fps": [oot_step_rate.MAIN + oot_step_rate.SITE]}
 
 
 def main():
@@ -175,8 +190,25 @@ def main():
             oot_jitter.install(L, img)
         import oot_occlusion   # (no occlusion queries when RELINK_OCCLUSION_OFF=1: Fritchii's Occlusion Off)
         oot_occlusion.install(L, img)
+        import oot_fov   # (relink) the Insert menu's Field of view: the camera's angle scaled as it goes into the projection
+        oot_fov.install(L, img)
+        import oot_step_rate   # (relink, issues 16 and 67) the time step follows the real frame rate above 60 fps too
+        oot_step_rate.install(L, img)
     L.discover(max_insns=a.max_func)
     print("discovered %d functions (%.0fs)" % (len(L.funcs), time.time() - t0))
+    # (relink) exefs mods (nx2/exefs_mods.py, OOT_EXEFS_PATCHES: what make_game.py applied to this exefs): which functions
+    # their patches change, the changed code no translated function holds, and ReLink's own changes they are in the way of
+    modded, mod_notes = None, []
+    if os.environ.get("OOT_EXEFS_PATCHES"):
+        import exefs_mods
+        patched = exefs_mods.Patched(os.environ["OOT_EXEFS_PATCHES"], img)
+        modded, mod_notes = exefs_mods.lift_check(L, img, patched)
+        if a.standalone:
+            for feature, pcs in exefs_sites().items():
+                mod_notes += exefs_mods.site_lines(feature, pcs, patched, img)
+        print("exefs mods: %d changed instruction words, in %d translated functions" % (len(patched.words), len(modded)))
+        for line in mod_notes:
+            print("exefs mods: " + line)
     total = coverage(L, img, img_dir)
     jt = L.stats
     print("jump tables %d (bounded %d, bounded by function %d, ADR table %d), BR without a table %d, PLT stubs %d" % (
@@ -195,7 +227,19 @@ def main():
                              counters=[] if a.no_polls else [poll.stats])
         import oot_patches
         main_build = next((m["build_id"] for m in meta["modules"] if m["name"] == "main"), "")
-        edit_c(gen, L.stats, a.standalone and main_build == oot_patches.LIFE_BUILD_ID, whole=not a.max_func)
+        for name in ("relink_exefs_lift.txt", "relink_exefs_stop.txt"):   # (exefs_mods.LIFT_NOTES, LIFT_STOP: an earlier lift's)
+            if os.path.exists(os.path.join(gen, name)):
+                os.remove(os.path.join(gen, name))
+        try:
+            edit_c(gen, L.stats, a.standalone and main_build == oot_patches.LIFE_BUILD_ID, whole=not a.max_func,
+                   modded=modded, notes=mod_notes)
+        except oot_patches.ExefsModConflict as e:   # (said by make_game.py as it is: nx2/exefs_mods.py)
+            with open(os.path.join(gen, "relink_exefs_stop.txt"), "w", encoding="utf-8", newline="\n") as f:
+                f.write(str(e) + "\n")
+            raise
+        if modded is not None:
+            with open(os.path.join(gen, "relink_exefs_lift.txt"), "w", encoding="utf-8", newline="\n") as f:
+                f.write("".join(line + "\n" for line in mod_notes))
         a64_rtgen.write(gen)
         if a.standalone:
             start, exit_ = standalone.write_image_c(gen, img, meta, a.exefs)

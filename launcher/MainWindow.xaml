@@ -34,6 +34,11 @@
           <TextBlock x:Name="StatusText" FontSize="13.5" Foreground="{StaticResource BoneSoft}" VerticalAlignment="Center"/>
           <Button x:Name="UpdateLink" Style="{StaticResource Link}" Foreground="{StaticResource Gold}" Margin="14,0,0,0" Visibility="Collapsed" Click="UpdateClick"/>
         </StackPanel>
+        <!-- exefs mods: the code patches in mods are not the ones the game was built with (ExefsMods.cs) -->
+        <StackPanel x:Name="ModsRow" Orientation="Horizontal" Margin="2,8,0,0" Visibility="Collapsed">
+          <TextBlock x:Name="ModsText" FontSize="13.5" Foreground="{StaticResource BoneSoft}" VerticalAlignment="Center"/>
+          <Button x:Name="RebuildLink" Style="{StaticResource Link}" Foreground="{StaticResource Gold}" Margin="14,0,0,0" Click="RebuildClick"/>
+        </StackPanel>
         <StackPanel Orientation="Horizontal" Margin="2,14,0,0">
           <Button x:Name="FolderLink" Style="{StaticResource Link}" Margin="0,0,22,0" Click="OpenGameFolder"/>
           <Button x:Name="HelpLink" Style="{StaticResource Link}" Margin="0,0,22,0" Click="OpenHelp"/>

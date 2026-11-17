@@ -38,6 +38,8 @@
 #include "oot_cheat_items.h"
 #include "oot_teleport_capture.h"   // (relink: the Travel page's pictures)
 #include "oot_tp_places.h"   // (relink: the Travel page's places)
+#include "prompt_tex.h"   // (relink: the HUD cross's letters follow the button font)
+#include "vk_screenshot.h"   // (relink: F12)
 #include "vk_startup_paint.h"
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
 #include "vk_dlss.h"
@@ -502,6 +504,16 @@ MENU_HINTS(hn_pad_layout, 0, "The Switch's order: A on the right, B at the botto
            "A at the bottom (action and talk), B on the right, X on the left, Y at the top.",
            "A at the bottom, B on the right; X and Y as on the Switch.",
            "Bindings of your own, from the Controls page.")
+// (relink) Button prompts: the game's button font, made for the family and the bindings at the start (host/prompts.c)
+const char* tx_button_prompts(int v) {
+    static const char* t[] = {"Nintendo", "Xbox", "PlayStation"};
+    return t[std::clamp(v, 0, 2)];
+}
+MENU_HINTS(hn_button_prompts, 0, "The game's own: the Switch's letters.",
+           "A, B, X, Y, LB, RB, LT, RT, Menu and View, drawn by ReLink, the faded letters around the HUD's action button "
+           "too. The ocarina's notes keep the Switch's.",
+           "Cross, circle, square, triangle, L1, R1, L2, R2, Options and Create, drawn by ReLink, the faded letters around "
+           "the HUD's action button too. The ocarina's notes keep the Switch's.")
 
 Row rows[] = {
     // Graphics (the DLSS model only in a build with DLSS: row_shown)
@@ -536,6 +548,8 @@ Row rows[] = {
      "Runs the game as if the console were undocked. Applies after a restart.", hn_handheld, true},
     {TAB_GRAPHICS, "Ultrawide", &opts.ultrawide, 0, 1, 1, tx_ultrawide,
      "The camera's shape on a screen wider than 16:9. Applies after a restart.", hn_ultrawide, true},
+    {TAB_GRAPHICS, "Field of view", &opts.fov, 70, 150, 5, tx_percent,
+     "How wide the camera sees, in percent of the game's own angle. Above 100% shows more around Link.", nullptr, false, true},
     {TAB_GRAPHICS, "Robust buffers", &opts.robust, 0, 2, 1, tx_robust,
      "Bounds-checked buffer reads: a read past a buffer's end is dropped instead of stopping the GPU. Applies after a "
      "restart.", hn_robust, true},
@@ -557,7 +571,7 @@ Row rows[] = {
     {TAB_GAMEPLAY, "Cycle items", &opts.cycle_items, 0, 4, 1, tx_cycle_items,
      "Changes the item on ZR with a tap of R or L, within its group. Holding R or L still opens the row.", hn_cycle_items},
 
-    // Controls (14 rows)
+    // Controls (17 rows)
     {TAB_CONTROLS, "Controller in background", &opts.pad_background, 0, 1, 1, tx_onoff,
      "Whether the controller plays the game while another window has the focus.", hn_background},
     {TAB_CONTROLS, "Mouse camera", &opts.mouse_native, 0, 1, 1, tx_mousecam, "How the captured mouse turns the camera.",
@@ -573,6 +587,12 @@ Row rows[] = {
      "Inverts vertical look (up/down) on the right analog stick.", nullptr, false, true},
     {TAB_CONTROLS, "Rumble strength", &opts.rumble, 0, 150, 25, tx_rumble,
      "How strongly the controller rumbles, in percent of the game's rumble. Off turns it off.", nullptr, false, true},
+    {TAB_CONTROLS, "Left stick dead zone", &opts.deadzone_l, 0, 50, 2, tx_percent,
+     "How far the left stick must move before Link walks. Raise it if Link moves on his own (stick drift).", nullptr,
+     false, true},
+    {TAB_CONTROLS, "Right stick dead zone", &opts.deadzone_r, 0, 50, 2, tx_percent,
+     "How far the right stick must move before the camera turns. Raise it if the camera drifts on its own.", nullptr,
+     false, true},
     {TAB_CONTROLS, "Motion controls", &opts.gyro, 0, 1, 1, tx_gyro,
      "Aiming and looking with the controller's gyroscope where the game uses motion, as on the Switch.", hn_gyro},
     {TAB_CONTROLS, "Motion sensitivity X", &opts.gyro_sens_x, 10, 300, 10, tx_percent,
@@ -587,6 +607,9 @@ Row rows[] = {
      nullptr, false, true},
     {TAB_CONTROLS, "Layout preset", &opts.pad_layout, 0, 3, 1, tx_pad_layout,
      "Which face button is which. Binding one yourself on the Controls page makes it Custom.", hn_pad_layout},
+    {TAB_CONTROLS, "Button prompts", &opts.button_prompts, 0, 2, 1, tx_button_prompts,   // (relink: host/prompts.c)
+     "The buttons the game's prompts show. They follow the Layout preset and your own bindings. Applies the next time the "
+     "game starts.", hn_button_prompts, true, true},
     {TAB_CONTROLS, "Controls", nullptr, 0, 0, 0, nullptr,   // (relink: opens its page)
      "Which gamepad button and which keys press each of the Switch's buttons."},
     {TAB_GAMEPLAY, "Quit game", nullptr, 0, 0, 0, nullptr,   // (relink, issue 32: asks first, then closes the game)
@@ -790,7 +813,7 @@ int cheat_value_l[kCheatRows];
 int list_value_l[kTeleportLines];
 bool is_slider(const Row& r) { return r.value == &opts.sharpness || r.value == &opts.mouse_sens || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y; }
 /// (a scale: the arrows, a click and the wheel stop at its ends; Rumble strength would go from Off to its strongest)
-bool stops_at_ends(const Row& r) { return r.value == &opts.mouse_sens || r.value == &opts.rumble || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y; }
+bool stops_at_ends(const Row& r) { return r.value == &opts.mouse_sens || r.value == &opts.rumble || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.deadzone_l || r.value == &opts.deadzone_r || r.value == &opts.fov; }
 /// (the ini's Rumble strength on the menu's steps: 0 to 150, the nearest 25)
 int rumble_step(int v) { return (std::min(std::max(v, 0), 150) + 12) / 25 * 25; }
 std::string ini_path() {
@@ -2124,6 +2147,9 @@ void menu_init() {
         }
         if (!has_resolution && old_dynres >= 0) opts.resolution = old_dynres ? 0 : 1;
         opts.rumble = rumble_step(opts.rumble);   // (a hand-edited 60: 50, on the arrows' steps)
+        opts.deadzone_l = std::min(std::max(opts.deadzone_l, 0), 50) / 2 * 2;   // (relink: host/hos_stick.h)
+        opts.deadzone_r = std::min(std::max(opts.deadzone_r, 0), 50) / 2 * 2;
+        opts.fov = std::min(std::max(opts.fov, 70), 150) / 5 * 5;   // (relink: nx2/oot_fov.py)
         // (Game speed is Real time by default now: Per frame played at half speed at 30 fps, the "slow motion" players
         // reported. An options file from before kept the old default whether chosen or not: Real time for it too)
         if (!v2) opts.realtime = 1;
@@ -2184,6 +2210,26 @@ void menu_store_capture(int place, const uint8_t* rgba, uint32_t w, uint32_t h) 
     picture_job(std::move(j));
 }
 bool menu_teleport_captures_on() { return travel_pictures_on.load(std::memory_order_relaxed); }   // (relink)
+/// (relink) F12 (menu_tick): the next present's picture is kept. With the menu open too: the picture is the game's, the
+/// menu is drawn over it afterwards and is not in it
+std::atomic<bool> screenshot_want{false};
+bool menu_take_screenshot_request() { return screenshot_want.exchange(false, std::memory_order_relaxed); }
+void menu_store_screenshot(std::vector<uint8_t>&& rgba, uint32_t w, uint32_t h) {
+    // (a thread of its own: compressing and writing a 3840x2160 picture takes a few hundred ms, never the replay's)
+    std::thread([px = std::move(rgba), w, h] {
+        const std::string path = screenshot_path(game_folder_file("screenshots"));
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool saved = screenshot_write(path, px.data(), w, h);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        const size_t slash = path.find_last_of("\\/");
+        const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+        logf("menu: screenshot %ux%u %s%s (%.0f ms)", w, h, saved ? "written to " : "NOT written: ", path.empty() ? "no game folder" : path.c_str(), ms);
+        if (saved) snprintf(notice_text, sizeof notice_text, "Screenshot saved: screenshots\\%s", name.c_str());
+        else snprintf(notice_text, sizeof notice_text, "The screenshot could not be saved");
+        notice_new.store(true, std::memory_order_release);
+        notice_until.store(prof_now() + 2500000000LL, std::memory_order_relaxed);
+    }).detach();
+}
 int menu_heart_protection() { return protect_hearts.load(std::memory_order_relaxed); }
 int menu_player_flight() { return cheats_enabled ? player_flight.load(std::memory_order_relaxed) : -1; }
 int menu_free_camera() { return free_camera.load(std::memory_order_relaxed); }
@@ -2240,6 +2286,7 @@ bool fps_take(int64_t now, int64_t shown, int64_t game, int64_t* next, int64_t* 
 int menu_item_count(int i) { return i >= 0 && i < kItems ? item_counts[i].load(std::memory_order_relaxed) : -1; }
 int menu_link_age() { return link_age.load(std::memory_order_relaxed); }
 void menu_option_set(int id, int value) {
+    if (id == HOS_PROMPTS_TEX_ID) return prompt_tex_announce(value);   // (relink: the button font's family and bindings, host/prompts.c)
     if (id == OOT_CHEAT_AGE_ID) {   // (relink: the Travel page's list is of Link's age)
         if (link_age.exchange(value, std::memory_order_relaxed) != value && page == 6) menu_refresh = true;
         return;
@@ -2331,6 +2378,10 @@ void menu_tick() {
         press[i] = host && host->take_key_press ? mine && queued : down && !held[i];
         held[i] = down;
     }
+    // (relink) F12: a screenshot of the game's picture (vk_screenshot.h), menu open or not; not while a control waits for
+    // its key in the menu (the key is that control's then)
+    if (host && host->take_key_press && host->take_key_press(VK_F12) && mine && !listening)
+        screenshot_want.store(true, std::memory_order_relaxed);
     // (relink) the gamepads, by position: Home, or Select and Start together, as Insert; the D-pad as the arrows,
     // the bottom face button as Enter, the right one as Esc (not while a binding waits for its button)
     static uint32_t pad_held = 0;
@@ -2359,6 +2410,7 @@ void menu_tick() {
         press[4] |= pad(HOS_PAD_RIGHT), press[5] |= pad(HOS_PAD_EAST), press[7] |= pad(HOS_PAD_SOUTH);
     }
     {   // RX_VK_MENU_SCRIPT (test runs, which never have the focus): timed menu keys, "<seconds>:<INS|UP|DOWN|LEFT|RIGHT|ESC|ENTER|TABL|TABR>,..."
+        // (SHOT: F12, the screenshot)
         static const char* next = getenv("RX_VK_MENU_SCRIPT");
         static const int64_t start = prof_now();
         double at;
@@ -2367,6 +2419,7 @@ void menu_tick() {
         if (next && sscanf(next, "%lf:%7[A-Z]%n", &at, key, &n) == 2 && (prof_now() - start) / 1e9 >= at) {
             static const char* names[] = {"INS", "UP", "DOWN", "LEFT", "RIGHT", "ESC", "", "ENTER", "", "", "TABL", "TABR"};
             for (int i = 0; i < 12; i++) press[i] |= *names[i] && !strcmp(key, names[i]);
+            if (!strcmp(key, "SHOT")) screenshot_want.store(true, std::memory_order_relaxed);
             next = next[n] == ',' ? next + n + 1 : nullptr;
         }
     }

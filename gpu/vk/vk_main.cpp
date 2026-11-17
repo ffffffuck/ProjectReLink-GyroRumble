@@ -24,6 +24,7 @@
 #include "vk_fsr.h"
 #include "vk_reflex.h"
 #include "vk_progress.h"
+#include "vk_push_fix.h"
 
 namespace vkx {
 #define VKX_DEFINE(f) PFN_##f f;
@@ -146,6 +147,35 @@ void guard_shader_modules() {
 #else
 void guard_shader_modules() {}
 #endif
+
+// (relink, issue 640) The mesh shader fallback's task programs read the task payloads' address from the push constants by the
+// member's byte offset (64) where SPIR-V takes the member's index (3): an access chain past the block's last member. Such a module
+// is invalid, and NVIDIA's compiler faulted on it (vkCreateComputePipelines, "a fault in the driver", 10 ms). A GTX 1060's and a
+// GTX 1070's logs ended there: their first task + mesh draw (a5da9f84b72d1471, Kokiri Forest after a save is loaded) "could not be
+// made", the next fallback compile never returned, and the picture stayed black with the game running behind it. Measured with
+// RX_VK_FORCE_MESH_FALLBACK=1 on an RTX 3060 Ti: the same fault on a5da9f84b72d1471, then the render thread's last line. The
+// translator makes them so, and the program caches players have keep them: here, as each module is made, such an index becomes
+// the index of the member at that offset (vk_push_fix.h). Only on a GPU that runs the fallback. RX_VK_NO_PUSH_FIX=1: the modules
+// as they are
+PFN_vkCreateShaderModule unfixed_create_shader_module = nullptr;
+std::atomic<int> push_fixes_told{0};
+VKAPI_ATTR VkResult VKAPI_CALL fixing_create_shader_module(VkDevice d, const VkShaderModuleCreateInfo* ci,
+                                                           const VkAllocationCallbacks* a, VkShaderModule* m) {
+    std::vector<uint32_t> w;
+    const size_t fixed = ci && ci->pCode && !(ci->codeSize % 4) ? push_offset_fix(ci->pCode, ci->codeSize / 4, w) : 0;
+    if (!fixed) return unfixed_create_shader_module(d, ci, a, m);
+    if (push_fixes_told++ < 4)
+        logf("vk: fallback: %zu push constant access%s by byte offset made by member index (issue 640)", fixed, fixed == 1 ? "" : "es");
+    VkShaderModuleCreateInfo with = *ci;
+    with.pCode = w.data();
+    with.codeSize = w.size() * 4;
+    return unfixed_create_shader_module(d, &with, a, m);
+}
+void fix_fallback_modules() {
+    if (!dev.mesh_fallback || getenv("RX_VK_NO_PUSH_FIX") || !vkx::vkCreateShaderModule) return;
+    unfixed_create_shader_module = vkx::vkCreateShaderModule;   // (the guard's, or the driver's)
+    vkx::vkCreateShaderModule = fixing_create_shader_module;
+}
 
 bool has_extension(const std::vector<VkExtensionProperties>& all, const char* name) {
     for (const auto& e : all)
@@ -271,6 +301,57 @@ bool pick_device() {
     return true;
 }
 
+// (relink, issue 640) What the translated shaders take for granted (vk_shader.cpp make_profile and host_info: no device asked) and
+// this GPU lacks, said once at start. A shader that uses one of these anyway is invalid for the driver, which may refuse its pipeline
+// or fault in its compiler. The GTX 10 cards' logs ended on a fallback compute pipeline that "could not be made", on drivers whose
+// features nobody here could read: this line names those missing, in the log a player already sends, to compare with ours
+void log_shader_needs(const VkPhysicalDeviceFeatures& f, const VkPhysicalDeviceVulkan11Features& f11,
+                      const VkPhysicalDeviceVulkan12Features& f12, const VkPhysicalDeviceVulkan13Features& f13) {
+    VkPhysicalDeviceVulkan12Properties p12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
+    VkPhysicalDeviceVulkan11Properties p11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES};
+    p11.pNext = &p12;
+    VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    p2.pNext = &p11;
+    vkGetPhysicalDeviceProperties2(dev.physical, &p2);
+    const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+    const VkSubgroupFeatureFlags ops = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT |
+                                       VK_SUBGROUP_FEATURE_SHUFFLE_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT |
+                                       VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_QUAD_BIT;
+    const struct { bool have; const char* name; } needs[] = {
+        {f12.shaderFloat16 != VK_FALSE, "shaderFloat16"},
+        {f12.shaderInt8 != VK_FALSE, "shaderInt8"},
+        {f.shaderInt16 != VK_FALSE, "shaderInt16"},
+        {f.shaderInt64 != VK_FALSE, "shaderInt64"},
+        {f.shaderFloat64 != VK_FALSE, "shaderFloat64"},
+        {f12.storageBuffer8BitAccess && f12.uniformAndStorageBuffer8BitAccess, "8-bit storage"},
+        {f11.storageBuffer16BitAccess && f11.uniformAndStorageBuffer16BitAccess, "16-bit storage"},
+        {f12.shaderBufferInt64Atomics != VK_FALSE, "shaderBufferInt64Atomics"},
+        {f12.shaderSharedInt64Atomics != VK_FALSE, "shaderSharedInt64Atomics"},
+        {f13.shaderDemoteToHelperInvocation != VK_FALSE, "shaderDemoteToHelperInvocation"},
+        {f.shaderStorageImageReadWithoutFormat && f.shaderStorageImageWriteWithoutFormat, "storage images without format"},
+        {f.shaderImageGatherExtended != VK_FALSE, "shaderImageGatherExtended"},
+        {f.multiViewport != VK_FALSE, "multiViewport"},
+        {f12.shaderOutputViewportIndex && f12.shaderOutputLayer, "shaderOutputViewportIndex/Layer"},
+        {f12.shaderSampledImageArrayNonUniformIndexing != VK_FALSE, "shaderSampledImageArrayNonUniformIndexing"},
+        {f.fragmentStoresAndAtomics && f.vertexPipelineStoresAndAtomics, "stores and atomics in vertex/fragment stages"},
+        {p12.shaderDenormPreserveFloat32 != VK_FALSE, "shaderDenormPreserveFloat32"},
+        {p12.shaderDenormFlushToZeroFloat32 != VK_FALSE, "shaderDenormFlushToZeroFloat32"},
+        {p12.shaderSignedZeroInfNanPreserveFloat16 && p12.shaderSignedZeroInfNanPreserveFloat32, "shaderSignedZeroInfNanPreserve 16/32"},
+        {p12.denormBehaviorIndependence != VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE, "denormBehaviorIndependence"},
+        {p12.roundingModeIndependence != VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE, "roundingModeIndependence"},
+        {(p11.subgroupSupportedStages & stages) == stages, "subgroups in vertex/fragment/compute"},
+        {(p11.subgroupSupportedOperations & ops) == ops, "subgroup vote/ballot/shuffle/arithmetic/quad"},
+    };
+    std::string missing;
+    for (const auto& n : needs)
+        if (!n.have) missing += missing.empty() ? n.name : std::string(", ") + n.name;
+    // (an RTX 3060 Ti, driver 0x9a170000, reports neither of the two fp32 denormal modes and runs every program: a name here is
+    // where to look, not a fault by itself)
+    logf("vk: shader features the translation assumes and this GPU does not report: %s (subgroup ops %#x on stages %#x; shared "
+         "memory %u bytes)", missing.empty() ? "none" : missing.c_str(), (unsigned)p11.subgroupSupportedOperations,
+         (unsigned)p11.subgroupSupportedStages, dev.props.limits.maxComputeSharedMemorySize);
+}
+
 bool create_device() {
     uint32_t n = 0;
     vkEnumerateDeviceExtensionProperties(dev.physical, nullptr, &n, nullptr);
@@ -377,6 +458,12 @@ bool create_device() {
         (void)dp;       //  NVIDIA's driver on Windows. RX_VK_PRESENT_QUEUE=1: on)
 #endif
         if (const char* e = getenv("RX_VK_PRESENT_QUEUE")) want = atoi(e) != 0;
+        // (relink: ReShade, and RenoDX through it, draws its effects and its HDR pass on the queue the presents are made on: a
+        // compute family's has no graphics, and ReShade turns itself off there. reshade_compat)
+        if (want && reshade_compat()) {
+            want = false;
+            logf("vk: ReShade / RenoDX: the presents stay on the graphics queue (RX_VK_PRESENT_QUEUE left off)");
+        }
         for (uint32_t i = 0; want && i < n && compute_family == UINT32_MAX; i++)
             if ((families[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && !(families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT))
                 compute_family = i;
@@ -427,6 +514,7 @@ bool create_device() {
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT afloat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
     if (dev.float_atomic_add) *tail = &afloat, tail = &afloat.pNext;
     vkGetPhysicalDeviceFeatures2(dev.physical, &f);
+    log_shader_needs(f.features, f11, f12, f13);
     dev.float_atomic_add = dev.float_atomic_add && afloat.shaderBufferFloat32AtomicAdd;
     if (dev.float_atomic_add) logf("vk: native float32 atomic add on storage buffers (VK_EXT_shader_atomic_float)");
     dev.max_reconvergence = dev.max_reconvergence && ucf.shaderSubgroupUniformControlFlow && maxr.shaderMaximalReconvergence;
@@ -534,6 +622,7 @@ bool create_device() {
 
     load_device(dev.device);
     guard_shader_modules();   // (relink, issue 43)
+    fix_fallback_modules();   // (relink, issue 640: after the guard, through it)
     vkGetDeviceQueue(dev.device, dev.queue_family, 0, &dev.queue);
     dev.present_queue = VK_NULL_HANDLE;
     dev.present_family = dev.queue_family;
@@ -553,6 +642,12 @@ bool create_device() {
 }
 
 } // namespace
+
+// (relink) "30, smooth" on the start-up screen: FIFO waits for until it is over. With FIFO and three images, AMD's present held
+// the queue for a refresh each time the screen was drawn (every 33 ms), and the shaders' preparation went from 3 minutes to hours
+// (an RX 6600 XT, 11-17: 1600 of 38809 in 5 minutes). The screen is drawn in the usual mode; the game's first frame makes the
+// swapchain again in FIFO (prepare_with_screen)
+static std::atomic<bool> fifo_held_for_startup{false};
 
 bool create_swapchain(uint32_t width, uint32_t height) {
     VkSurfaceCapabilitiesKHR caps;
@@ -598,7 +693,9 @@ bool create_swapchain(uint32_t width, uint32_t height) {
     if (result != VK_SUCCESS || modes.empty())
         logf("vk: querying present modes failed (VkResult %d, count %u); trying mandatory FIFO mode", (int)result, n);
     VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
-    const bool force_fifo = getenv("RX_VK_FIFO") != nullptr;   // (as on a card or driver with vsync forced)
+    // (as on a card or driver with vsync forced. relink: and the "30, smooth" frame rate, whose frames are each held for the
+    // same number of refreshes by presenting them again: only FIFO shows every present, one a refresh)
+    const bool force_fifo = getenv("RX_VK_FIFO") != nullptr || (fps_low_cap() > 0 && !fifo_held_for_startup.load());
     if (!force_fifo) {
         for (auto m : modes)
             if (m == VK_PRESENT_MODE_MAILBOX_KHR) mode = m;
@@ -617,6 +714,9 @@ bool create_swapchain(uint32_t width, uint32_t height) {
     VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     ci.surface = dev.surface;
     ci.minImageCount = std::max(caps.minImageCount, 4u);   // (relink: mailbox with frame interpolation: an image always free)
+    // (relink: "30, smooth": three. Each frame takes two of the queue's places, and a fourth image let a third frame queue: 50 ms
+    // more of delay for nothing, the display's pace being the frames' anyway)
+    if (fps_low_cap() && mode == VK_PRESENT_MODE_FIFO_KHR) ci.minImageCount = std::max(caps.minImageCount, 3u);
     if (caps.maxImageCount) ci.minImageCount = std::min(ci.minImageCount, caps.maxImageCount);
     ci.imageFormat = fmt.format;
     ci.imageColorSpace = fmt.colorSpace;
@@ -626,6 +726,12 @@ bool create_swapchain(uint32_t width, uint32_t height) {
     // The renderer copies into swapchain images. Readback is optional and only available on surfaces that allow it.
     if (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
         ci.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    // (relink) ReShade / RenoDX: their effects and RenoDX's HDR output pass draw into the swapchain's images (reshade_compat)
+    if (reshade_compat()) {
+        // (not storage: an sRGB swapchain format has no storage use, whatever the surface lists, and the swapchain would fail)
+        for (VkImageUsageFlags u : {VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_USAGE_SAMPLED_BIT})
+            if (caps.supportedUsageFlags & u) ci.imageUsage |= u;
+    }
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     if (!(caps.supportedCompositeAlpha & ci.compositeAlpha)) {
@@ -673,6 +779,7 @@ bool create_swapchain(uint32_t width, uint32_t height) {
     dev.swapchain = sc;
     dev.swap_rendered = std::move(rendered);
     dev.swap_format = fmt.format;
+    dev.swap_mode = mode;
     dev.swap_extent = {width, height};
     vkGetSwapchainImagesKHR(dev.device, sc, &n, nullptr);
     dev.swap_images.resize(n);
@@ -684,8 +791,75 @@ bool create_swapchain(uint32_t width, uint32_t height) {
 }
 
 namespace {
-
 HWND main_window = nullptr;
+} // namespace
+
+std::atomic<int> presents_shown{0};
+std::atomic<int> low_cap_mfps{0};
+bool reshade_compat() {
+    // (asked when the device is made, after the instance: ReShade's Vulkan layer, an implicit layer the ReShade installer registers
+    // for relink-game.exe, has loaded its DLL by then)
+    static int on = -1;
+    if (on >= 0) return on != 0;
+    const char* e = getenv("RX_VK_RESHADE");
+    if (e && *e) {
+        on = atoi(e) != 0;
+    } else {
+#ifdef _WIN32
+        on = GetModuleHandleA("ReShade64.dll") != nullptr || GetModuleHandleA("ReShade.dll") != nullptr;
+#else
+        on = 0;
+#endif
+    }
+    if (on) logf("vk: ReShade / RenoDX compatibility on (%s): presents on the graphics queue, the swapchain's images drawable",
+                 e && *e ? "RX_VK_RESHADE" : "ReShade's layer is loaded");
+    return on != 0;
+}
+int fps_low_cap() {
+    static const int cap = [] {
+        const char* e = getenv("HOS_FPS_CAP");
+        const char* u = getenv("HOS_FPS_UNLOCKED");
+        int v = e && *e ? atoi(e) : 0;
+        if (u && atoi(u) != 0) v = 0;   // (Unlocked wins, as host/nn_vi.c has it)
+        return v <= 0 || v >= 60 ? 0 : v < 20 ? 20 : v;
+    }();
+    return cap;
+}
+int display_refresh_hz() {
+#ifdef _WIN32
+    // (read again every 120 calls: the window may go to another display)
+    static int hz = 0, calls = 0;
+    if (hz && ++calls % 120) return hz;
+    HMONITOR m = main_window ? MonitorFromWindow(main_window, MONITOR_DEFAULTTOPRIMARY) : nullptr;
+    MONITORINFOEXA mi{};
+    mi.cbSize = sizeof mi;
+    const char* device = m && GetMonitorInfoA(m, (MONITORINFO*)&mi) ? mi.szDevice : nullptr;
+    DEVMODEA dm{};
+    dm.dmSize = sizeof dm;
+    const int reported = EnumDisplaySettingsA(device, ENUM_CURRENT_SETTINGS, &dm) ? (int)dm.dmDisplayFrequency : 0;
+    hz = reported > 1 ? reported : 60;
+    return hz;
+#else
+    return 60;
+#endif
+}
+int low_cap_repeats() {
+    const int cap = fps_low_cap();
+    if (!cap || dev.offscreen || dev.swap_mode != VK_PRESENT_MODE_FIFO_KHR || framegen_on()) return 1;
+    // (the refreshes nearest the cap's period: 60 and 120 Hz hold 30 fps exactly; 144 Hz holds each frame 5 refreshes, 28.8 fps)
+    const int hz = display_refresh_hz();
+    const int repeats = (hz + cap / 2) / cap;
+    low_cap_mfps.store(hz * 1000 / std::max(repeats, 1), std::memory_order_relaxed);   // (the rate the display shows: host/nn_vi.c)
+    static int told;
+    if (repeats != told) {
+        told = repeats;
+        logf("vk: %d fps cap: each frame held for %d refresh%s of the %d Hz display (%.1f fps)", cap, std::max(repeats, 1),
+             repeats > 1 ? "es" : "", hz, (double)hz / std::max(repeats, 1));
+    }
+    return std::min(std::max(repeats, 1), 8);
+}
+
+namespace {
 // (relink) relink --prepare-shaders (a builder, after a build): the same work with no game, its progress as
 // "@@progress" lines on stdout. A skip there leaves relink_prepare_skipped beside the game: its own starts then
 // leave the work out too (what was not prepared is built when first drawn), until a --prepare-shaders run ends it
@@ -732,6 +906,11 @@ void window_size(uint32_t* w, uint32_t* h) {
 void prepare_with_screen() {
     prep_ended = CreateEventA(nullptr, TRUE, FALSE, nullptr);
     prep_running.store(true);
+    if (fps_low_cap() && !getenv("RX_VK_FIFO") && dev.swap_extent.width && dev.swap_extent.height) {
+        // (the start-up screen's presents in the usual mode: the swapchain made again at its next present, present_image)
+        fifo_held_for_startup.store(true);
+        dev.swap_resize.store((uint64_t)dev.swap_extent.width << 32 | dev.swap_extent.height, std::memory_order_release);
+    }
     std::thread worker([] {
         const bool update = prepare_is_update();   // (an update, RX_VK_PREPARE_BACKGROUND=1: what the notes name now, the rest in play)
         const bool prepared = !update && prepare_run(prep_progress, false);
@@ -813,6 +992,11 @@ void prepare_with_screen() {
     }
     startup_screen(nullptr);
     prep_running.store(false);
+    if (fifo_held_for_startup.exchange(false)) {   // ("30, smooth": FIFO from the game's first frame on)
+        const uint64_t want = dev.swap_resize.load(std::memory_order_acquire);
+        if (!want && dev.swap_extent.width && dev.swap_extent.height)
+            dev.swap_resize.store((uint64_t)dev.swap_extent.width << 32 | dev.swap_extent.height, std::memory_order_release);
+    }
     logf("vk: start-up: the shaders took %.1f s", std::chrono::duration<double>(clock::now() - t0).count());
 }
 bool started_up() {

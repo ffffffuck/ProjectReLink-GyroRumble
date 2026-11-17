@@ -50,6 +50,7 @@
 #include "bc_levels.h"
 #include "astc_bc_policy.h"
 #include "keep_rendered.h"
+#include "prompt_tex.h"
 #include "target_overlap.h"
 #include "host_shaders/block_linear_unswizzle_2d_comp_spv.h"
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
@@ -1368,6 +1369,9 @@ bool upload(Texture& tex, const Ranges* dirty) {
     const int out_bpb = tex.astc ? 4 : widen_from ? (widen_from == 3 ? 4 : widen_from == 6 ? 8 : 16) : src_bpb;
     const uint32_t copy_layers = tex.type == VK_IMAGE_TYPE_3D ? 1 : tex.layers;
     const VkImageAspectFlags aspect = tex.aspect;
+    // (relink) the HUD cross's letters: a texture of their shape is uploaded whole (a partial upload too), and one of the
+    // game's four goes up as ReLink's mask when prompt_tex.h says so
+    const bool keytex = prompt_tex_shape(tex) && !widen_from;
     std::vector<VkBufferImageCopy> copies;
     std::vector<uint8_t> scratch, lin;
     VkBuffer buffer = VK_NULL_HANDLE;
@@ -1385,7 +1389,7 @@ bool upload(Texture& tex, const Ranges* dirty) {
             const uint64_t gobs_x = ((uint64_t)g.tw * src_bpb + 63) / 64;
             const uint64_t row_bytes = gobs_x * (512ull << (g.tile_h + g.tile_d));
             std::vector<std::pair<uint32_t, uint32_t>> runs;   // (first row, rows)
-            if (!dirty || linear || tex.astc || widen_from || g.td > 1 || g.tile_d) {
+            if (!dirty || linear || tex.astc || widen_from || g.td > 1 || g.tile_d || keytex) {
                 runs.push_back({0, nrows});
             } else {
                 std::vector<uint8_t> mark(nrows, 0);
@@ -1501,6 +1505,8 @@ bool upload(Texture& tex, const Ranges* dirty) {
                     st_unswizzle_ns +=
                         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - u0).count();
                 }
+                if (keytex && y0 == 0 && th == g.th && block_bytes == prompt_tex::kBlocks)
+                    tex.keytex_wait = prompt_tex_apply(blocks) < 0;
                 if (tex.astc) {
                     Tegra::Texture::ASTC::DecompressSerial(std::span<const uint8_t>(blocks, block_bytes), g.w, px_h, g.d,
                                                            (u32)tex.block_w, (u32)tex.block_h,
@@ -1796,6 +1802,216 @@ void forget_gpu(Texture* tex) {
             by_gpu.erase(it);
             break;
         }
+}
+
+// ---- (relink, issues 47, 59, 72) textures the GPU drew, parked in system memory when the budget evicts them ----
+// The eviction below lets a texture the GPU drew go without its texels anywhere else when they cannot be written back into the
+// game's memory: a depth texture (the write-back is for colour), one finalized past the keep rule's 4 MB, a live one past the
+// write-back's 16 MB. Made again at the same storage, it came back empty: the 12288 x 12288 DEPTH16 texture the terrain samples
+// (a log of issue 59: "made again 1943 frames after its eviction and sampled before any draw"), dark blocks and streaks over the
+// ground in Hyrule Field and Dodongo's Cavern after a while of play. Now such a texture is copied into system memory as it goes
+// (one read-back, waited for: ~10 ms for 288 MB) and, when a texture of the same storage, size and format is made again while
+// neither the CPU nor a render target has written that storage since, copied back into the new image before anything uses it:
+// as the console's memory would have kept it. Bounded by RX_VK_PARK_MB (the smaller of 1024 and an 1/16 of the RAM; 0: off, as
+// before), the oldest dropped beyond it, and none parked while the system is short on commit (commit_short)
+bool readback_begin();
+bool readback_submit_wait();
+VkCommandBuffer rb_cmd_for_park();   // (the read-backs' command buffer, below)
+struct Parked {
+    VkBuffer buf = VK_NULL_HANDLE;
+    VmaAllocation alloc = nullptr;
+    std::vector<VkBufferImageCopy> regions;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    VkImageType type = VK_IMAGE_TYPE_2D;
+    VkImageAspectFlags aspect = 0;
+    uint32_t width = 0, height = 0, depth = 0, levels = 0, layers = 0;
+    uint64_t bytes = 0, frame = 0;
+    uint32_t gen = 0;   // (the memory generation as it went: the CPU's writes since, and render targets' ranges since, win)
+};
+std::mutex parked_mu;
+std::unordered_map<uint64_t, Parked> parked;   // (evicted_key -> its texels)
+uint64_t parked_bytes = 0;
+std::atomic<int64_t> st_parked{0}, st_restored{0}, st_park_dropped{0}, st_park_stale{0};
+uint64_t park_cap() {
+    static const uint64_t cap = [] {
+        if (const char* e = getenv("RX_VK_PARK_MB")) return (uint64_t)std::max(0, atoi(e)) << 20;
+        uint64_t ram = 0;
+#ifdef _WIN32
+        MEMORYSTATUSEX ms{};
+        ms.dwLength = sizeof ms;
+        if (GlobalMemoryStatusEx(&ms)) ram = ms.ullTotalPhys;
+#endif
+        return ram ? std::min<uint64_t>(1024ull << 20, ram / 16) : (512ull << 20);
+    }();
+    return cap;
+}
+// (the bytes of one texel of an uncompressed format the GPU draws into; 0: not parked)
+uint32_t park_texel_bytes(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM: case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT: case VK_FORMAT_S8_UINT:
+        return 1;
+    case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT:
+    case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_SNORM: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16_SINT: case VK_FORMAT_R16_SFLOAT:
+    case VK_FORMAT_D16_UNORM: case VK_FORMAT_R5G6B5_UNORM_PACK16: case VK_FORMAT_B5G6R5_UNORM_PACK16:
+    case VK_FORMAT_R5G5B5A1_UNORM_PACK16: case VK_FORMAT_A1R5G5B5_UNORM_PACK16: case VK_FORMAT_R4G4B4A4_UNORM_PACK16:
+        return 2;
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SNORM: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R8G8B8A8_SINT:
+    case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB:
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_A2B10G10R10_UINT_PACK32: case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32: case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32:
+    case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SNORM: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16_SINT:
+    case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32_SFLOAT:
+    case VK_FORMAT_D32_SFLOAT: case VK_FORMAT_X8_D24_UNORM_PACK32:
+        return 4;
+    case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R16G16B16A16_SNORM: case VK_FORMAT_R16G16B16A16_UINT:
+    case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT:
+    case VK_FORMAT_R32G32_SFLOAT:
+        return 8;
+    case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: case VK_FORMAT_R32G32B32A32_SFLOAT:
+        return 16;
+    default:
+        return 0;
+    }
+}
+// (a render target's range registered over [lo, hi) since gen, other than the texture's own exact range: the storage was drawn
+// over, and what the console's memory holds there is that, not the parked texels)
+bool park_storage_taken(uint64_t lo, uint64_t hi, uint32_t gen) {
+    auto it = gpu_owned.upper_bound(lo);
+    if (it != gpu_owned.begin()) --it;
+    for (; it != gpu_owned.end() && it->first < hi; ++it)
+        if (it->second.first > lo && !(it->first == lo && it->second.first == hi) && it->second.second > gen) return true;
+    return false;
+}
+void park_drop_oldest_locked() {
+    auto oldest = parked.begin();
+    for (auto it = parked.begin(); it != parked.end(); ++it)
+        if (it->second.frame < oldest->second.frame) oldest = it;
+    if (oldest == parked.end()) return;
+    parked_bytes -= std::min(parked_bytes, oldest->second.bytes);
+    reap([b = oldest->second.buf, a = oldest->second.alloc] { destroy_buffer(b, a); });
+    parked.erase(oldest);
+    st_park_dropped++;
+}
+/// The texture's image copied into system memory before its eviction; false when it is not one that can be (then it goes as before)
+bool park_texture(const Texture& t, uint64_t frame) {
+    const uint64_t cap = park_cap();
+    if (!cap || !t.image || t.sparse || t.samples != VK_SAMPLE_COUNT_1_BIT || t.astc || t.bc || !t.ci.extent.width) return false;
+    if (t.aspect != VK_IMAGE_ASPECT_COLOR_BIT && t.aspect != VK_IMAGE_ASPECT_DEPTH_BIT) return false;   // (no depth-stencil pairs)
+    const uint32_t texel = park_texel_bytes(t.ci.format);
+    if (!texel || commit_short(frame)) return false;
+    const bool is3d = t.ci.imageType == VK_IMAGE_TYPE_3D;
+    const uint32_t layers = is3d ? 1 : t.ci.arrayLayers;
+    std::vector<VkBufferImageCopy> regions;
+    uint64_t total = 0;
+    for (uint32_t level = 0; level < t.ci.mipLevels; level++) {
+        const uint32_t w = std::max(1u, t.ci.extent.width >> level), h = std::max(1u, t.ci.extent.height >> level),
+                       d = is3d ? std::max(1u, t.ci.extent.depth >> level) : 1u;
+        VkBufferImageCopy r{};
+        r.bufferOffset = total;
+        r.imageSubresource = {t.aspect, level, 0, layers};
+        r.imageExtent = {w, h, d};
+        regions.push_back(r);
+        total += ((uint64_t)w * h * d * layers * texel + 15) & ~15ull;
+    }
+    if (!total || total > cap) return false;
+    {
+        std::lock_guard lk(parked_mu);
+        while (!parked.empty() && parked_bytes + total > cap) park_drop_oldest_locked();
+    }
+    VkBuffer buf = VK_NULL_HANDLE;
+    VmaAllocation alloc = nullptr;
+    void* map = nullptr;
+    if (!create_buffer_cached(total, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, buf, alloc, &map, true))
+        return false;
+    bool ok = readback_begin();
+    if (ok) {
+        full_barrier(rb_cmd_for_park());   // (after what the submissions before wrote)
+        vkCmdCopyImageToBuffer(rb_cmd_for_park(), t.image, VK_IMAGE_LAYOUT_GENERAL, buf, (uint32_t)regions.size(), regions.data());
+        ok = readback_submit_wait();
+    }
+    if (!ok) {
+        destroy_buffer(buf, alloc);
+        return false;
+    }
+    Parked p;
+    p.buf = buf, p.alloc = alloc, p.regions = std::move(regions), p.format = t.ci.format, p.type = t.ci.imageType;
+    p.aspect = t.aspect, p.width = t.ci.extent.width, p.height = t.ci.extent.height, p.depth = t.ci.extent.depth;
+    p.levels = t.ci.mipLevels, p.layers = layers, p.bytes = total, p.frame = frame, p.gen = memory_generation();
+    const uint64_t key = evicted_key(t.gpu, t.width, t.height, t.nvn_format);
+    const int64_t n = ++st_parked;
+    {
+        std::lock_guard lk(parked_mu);
+        auto old = parked.find(key);
+        if (old != parked.end()) {
+            parked_bytes -= std::min(parked_bytes, old->second.bytes);
+            reap([b = old->second.buf, a = old->second.alloc] { destroy_buffer(b, a); });
+            parked.erase(old);
+        }
+        parked_bytes += total;
+        parked.emplace(key, std::move(p));
+    }
+    if (n <= 40 || n % 100 == 0)
+        logf("vk: texture #%u %#llx %ux%u x%u NVN %#x the GPU drew: evicted, its texels kept in system memory (%llu KB; %llu MB "
+             "parked, %lld so far)", t.id, (unsigned long long)t.gpu, t.width, t.height, t.layers, t.nvn_format,
+             (unsigned long long)(total >> 10), (unsigned long long)(parked_bytes >> 20), (long long)n);
+    return true;
+}
+/// A texture just made (its image cleared in cmd): the texels parked for its storage, size and format copied into it, when the
+/// storage kept them. True when it was filled so
+bool park_restore(Texture& x, VkCommandBuffer cmd, uint64_t frame) {
+    if (!st_parked.load(std::memory_order_relaxed) || !x.image) return false;
+    const uint64_t key = evicted_key(x.gpu, x.width, x.height, x.nvn_format);
+    Parked p;
+    {
+        std::lock_guard lk(parked_mu);
+        auto it = parked.find(key);
+        if (it == parked.end()) return false;
+        p = std::move(it->second);
+        parked_bytes -= std::min(parked_bytes, p.bytes);
+        parked.erase(it);
+    }
+    const uint32_t layers = x.ci.imageType == VK_IMAGE_TYPE_3D ? 1 : x.ci.arrayLayers;
+    static thread_local Ranges since;
+    const bool same = p.format == x.ci.format && p.type == x.ci.imageType && p.aspect == x.aspect && p.width == x.ci.extent.width &&
+                      p.height == x.ci.extent.height && p.depth == x.ci.extent.depth && p.levels == x.ci.mipLevels && p.layers == layers;
+    const bool cpu_wrote = x.guest && x.gpu < (1ull << 40) && texture_dirty(x, p.gen, since);
+    const bool drawn_over = park_storage_taken(x.gpu, x.gpu + std::max<uint64_t>(x.guest_size, 1), p.gen);
+    if (!same || cpu_wrote || drawn_over) {
+        st_park_stale++;
+        reap([b = p.buf, a = p.alloc] { destroy_buffer(b, a); });
+        return false;
+    }
+    vkCmdCopyBufferToImage(cmd, p.buf, x.image, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)p.regions.size(), p.regions.data());
+    VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};   // (the copy done before anything after it reads or draws the image)
+    b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+    b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = 1;
+    di.pMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(cmd, &di);
+    {   // (the buffer goes once the recording that copies from it is done)
+        Dead d{rec_value, VK_NULL_HANDLE, nullptr, {}, {}};
+        d.buffer = p.buf, d.buffer_alloc = p.alloc;
+        dead.push_back(std::move(d));
+    }
+    // (the image is the content again, as the GPU drew it: not uploaded over from memory, kept by the eviction's rules)
+    x.gpu_written = true;
+    x.uploaded = true;
+    x.upload_gen = memory_generation();
+    x.first_written = x.last_written = frame;
+    {
+        std::lock_guard lk(lost_mu);   // (issue 47's note: not lost)
+        if (lost_at.erase(key)) lost_n.store(lost_at.size(), std::memory_order_relaxed);
+    }
+    const int64_t n = ++st_restored;
+    if (n <= 40 || n % 100 == 0)
+        logf("vk: texture #%u %#llx %ux%u x%u NVN %#x made again %llu frames after its eviction: its texels copied back from system "
+             "memory (%lld so far; %lld parked, %lld dropped for room, %lld stale)", x.id, (unsigned long long)x.gpu, x.width,
+             x.height, x.layers, x.nvn_format, (unsigned long long)(frame - p.frame), (long long)n, (long long)st_parked.load(),
+             (long long)st_park_dropped.load(), (long long)st_park_stale.load());
+    return true;
 }
 
 Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw, int bh, int bpb) {
@@ -2123,6 +2339,9 @@ Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw
     redirect.done();
     static uint32_t ids;
     p->id = ++ids;
+    // (relink: a drawn texture evicted from this storage, its texels parked in system memory: copied back, after the clear above,
+    // which a parallel replay's worker recorded into an earlier segment's init. park_restore)
+    park_restore(*p, upload_cmd(), frame_no);
     p->first_seen = frame_no;
     st_made++;
     if (storage_spans_frame != ~0ull)   // (texture_storage_overlaps, once it is in use: RX_VK_WB_LAZY)
@@ -2192,6 +2411,12 @@ Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw
 }
 
 } // namespace
+
+bool prompt_tex_shape(const Texture& t) {
+    return t.format == VK_FORMAT_BC4_UNORM_BLOCK && t.type == VK_IMAGE_TYPE_2D && t.width == prompt_tex::kSize &&
+           t.height == prompt_tex::kSize && t.depth == 1 && t.levels == 1 && t.layers == 1 && !t.skip && !t.sparse && !t.astc &&
+           !t.bc && t.bpb == 8 && t.block_w == 4 && t.block_h == 4;
+}
 
 std::atomic<uint64_t> work_epoch{0};
 namespace {
@@ -2457,6 +2682,18 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
         }
         tex->upload_gen = gen;
         return tex;
+    }
+    if (tex->keytex_wait && !tex->gpu_written) {   // (relink: a HUD cross letter uploaded before its family was known: prompt_tex.h)
+        const int s = prompt_tex_state();
+        if (s >= 0) {
+            tex->keytex_wait = false;
+            if (s > 0) {   // (uploaded again, whole: replaced now)
+                tex->checked_epoch = epoch;
+                const uint32_t gen = memory_generation();
+                if (upload(*tex, nullptr)) tex->upload_value = rec_value, tex->upload_seg = tl_seg, tex->upload_gen = gen;
+                return tex;
+            }
+        }
     }
     {   // (RX_VK_REUPLOAD_DIM=<w>x<h> (debugging): textures that size uploaded whole again every frame: is what a
         // sampled texture misses in guest memory, unseen by the write tracking, or not there at all?)
@@ -2902,6 +3139,7 @@ void vw_forget(const Texture& t) {   // (the entry goes; other listed textures a
 VkCommandPool rb_pool = VK_NULL_HANDLE;
 VkCommandBuffer rb_cmd = VK_NULL_HANDLE;
 VkFence rb_fence = VK_NULL_HANDLE;
+VkCommandBuffer rb_cmd_for_park() { return rb_cmd; }   // (relink: park_texture, above)
 bool readback_begin() {
     if (!rb_pool) {
         VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -4361,9 +4599,10 @@ void texture_frame(uint64_t completed) {
             static std::atomic<int64_t> flushed{0};
             if (++flushed % 50 == 1) logf("vk: textures the GPU drew, written back into their memory before eviction: %lld so far", (long long)flushed.load());
         }
-        // (issue 47: its texels nowhere else, and nothing took its storage: noted, to be told if it is made again and sampled)
+        // (issue 47: its texels nowhere else, and nothing took its storage: parked in system memory (park_texture), else noted, to
+        // be told if it is made again and sampled)
         if (tex->gpu_written && !overwritten && !written_back &&
-            !(tex->released && (storage_taken(tex) || rewritten(tex))))
+            !(tex->released && (storage_taken(tex) || rewritten(tex))) && !park_texture(*tex, frame_no))
             lost_note(*tex, frame_no, !tex->released ? 3 : past_cap ? 1 : tex->bytes > (4ull << 20) ? 2 : 0);
         if (shifted) n_dead++, b_dead += tex->bytes;
         watch_tex(tex, "evicted");

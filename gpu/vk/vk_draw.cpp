@@ -1862,18 +1862,25 @@ VkSampler sampler_make(int id, bool compare);
 VkSampler sampler_for(int id, bool compare) {
     static const bool on = !getenv("RX_VK_SAMPLER_CACHE") || atoi(getenv("RX_VK_SAMPLER_CACHE")) != 0;
     if (!on || id < 0 || id >= 4096) return sampler_make(id, compare);
-    struct Entry { uint64_t gen; VkSampler s; };
+    struct Entry { uint64_t gen; float bias; VkSampler s; };
     static thread_local Entry table[2][4096];   // (gen 0: never filled; the generation starts at 1)
     const uint64_t gen = sampler_registrations_generation();   // (read first: a registration after it makes the next call miss)
+    const float bias = compare ? 0.0f : upscaler_lod_bias();   // (relink: the upscaler's mip bias changes the sampler too)
     Entry& e = table[compare ? 1 : 0][id];
-    if (e.gen == gen) return e.s;
+    if (e.gen == gen && e.bias == bias) return e.s;
     const VkSampler made = sampler_make(id, compare);
-    e = {gen, made};
+    e = {gen, bias, made};
     return made;
 }
 VkSampler sampler_make(int id, bool compare) {
     nvn_samp_par p{};
     if (!sampler_of(id, &p)) p.minf = NVN_MIN_FILTER_LINEAR, p.magf = NVN_MAG_FILTER_LINEAR, p.lod_max = 1000.0f;
+    // (relink) DLSS / FSR drawing: the mipmapped textures' bias lowered by upscaler_lod_bias (vk_dlss.cpp), so the upscaled
+    // picture gets the output size's texture detail. Not the depth compares (shadow maps), nor samplers without mip levels (the
+    // render targets the passes read, the HUD's flat textures): the bias changes nothing there but the key
+    const bool mipmapped = p.minf == NVN_MIN_FILTER_NEAREST_MIPMAP_NEAREST || p.minf == NVN_MIN_FILTER_NEAREST_MIPMAP_LINEAR ||
+                           p.minf == NVN_MIN_FILTER_LINEAR_MIPMAP_NEAREST || p.minf == NVN_MIN_FILTER_LINEAR_MIPMAP_LINEAR;
+    if (!compare && mipmapped) p.lod_bias += upscaler_lod_bias();
     uint64_t key = mix(compare ? 0xC0 : 0xAB, aniso_override());
     const uint8_t* b = reinterpret_cast<const uint8_t*>(&p);
     for (size_t i = 0; i < sizeof p; i += 8) {
@@ -3122,27 +3129,28 @@ int words_same_store(const VkWriteDescriptorSet& w, uint64_t* o, const uint64_t*
 }
 
 bool bind_descriptors(VkCommandBuffer cmd, VkPipelineBindPoint bp, const Program& p) {
-    if (dw().writes.empty()) return true;
+    DescWriter& wr = dw();   // One TLS accessor for the writer used throughout this bind.
+    if (wr.writes.empty()) return true;
     Pushed& ps = pushed()[bp == VK_PIPELINE_BIND_POINT_COMPUTE];
     if (p.push) {
         static const bool whole = getenv("RX_VK_PUSH_ALL") != nullptr;   // (A/B: every binding every time)
         static const bool old_state = getenv("RX_VK_PUSH_STATE_OLD") != nullptr;   // (A/B: a vector of words a write, as before)
-        if (whole || ps.cmd != cmd || ps.layout != p.layout || ps.n != dw().writes.size()) {
+        if (whole || ps.cmd != cmd || ps.layout != p.layout || ps.n != wr.writes.size()) {
             if (g_fine) {
-                fine_n[FC_PUSH_FULL]++, fine_n[FC_PUSH_WRITES] += (int64_t)dw().writes.size();
-                for (const VkWriteDescriptorSet& w : dw().writes) fine_n[FC_PUSH_DESCS] += w.descriptorCount;
+                fine_n[FC_PUSH_FULL]++, fine_n[FC_PUSH_WRITES] += (int64_t)wr.writes.size();
+                for (const VkWriteDescriptorSet& w : wr.writes) fine_n[FC_PUSH_DESCS] += w.descriptorCount;
             }
             {
                 FINE_SCOPE(FT_PUSHCALL);
-                vkCmdPushDescriptorSetKHR(cmd, bp, p.layout, 0, (uint32_t)dw().writes.size(), dw().writes.data());
+                vkCmdPushDescriptorSetKHR(cmd, bp, p.layout, 0, (uint32_t)wr.writes.size(), wr.writes.data());
             }
-            ps.cmd = cmd, ps.layout = p.layout, ps.n = dw().writes.size();
+            ps.cmd = cmd, ps.layout = p.layout, ps.n = wr.writes.size();
             if (old_state) {
-                ps.writes.resize(dw().writes.size());
-                for (size_t i = 0; i < dw().writes.size(); i++) write_words(dw().writes[i], ps.writes[i]);
+                ps.writes.resize(wr.writes.size());
+                for (size_t i = 0; i < wr.writes.size(); i++) write_words(wr.writes[i], ps.writes[i]);
             } else {
                 ps.words.clear(), ps.at.clear();
-                for (const VkWriteDescriptorSet& w : dw().writes) ps.at.push_back((uint32_t)ps.words.size()), words_append(w, ps.words);
+                for (const VkWriteDescriptorSet& w : wr.writes) ps.at.push_back((uint32_t)ps.words.size()), words_append(w, ps.words);
             }
             return true;
         }
@@ -3150,19 +3158,19 @@ bool bind_descriptors(VkCommandBuffer cmd, VkPipelineBindPoint bp, const Program
         static thread_local std::vector<uint64_t> words;
         changed.clear();
         if (old_state) {
-            for (size_t i = 0; i < dw().writes.size(); i++) {
-                write_words(dw().writes[i], words);
-                if (words != ps.writes[i]) changed.push_back(dw().writes[i]), ps.writes[i].swap(words);
+            for (size_t i = 0; i < wr.writes.size(); i++) {
+                write_words(wr.writes[i], words);
+                if (words != ps.writes[i]) changed.push_back(wr.writes[i]), ps.writes[i].swap(words);
             }
         } else {   // (the same layout, so the same count of words in each write: compared and kept in place)
-            for (size_t i = 0; i < dw().writes.size(); i++) {
+            for (size_t i = 0; i < wr.writes.size(); i++) {
                 const uint64_t* end = ps.words.data() + (i + 1 < ps.at.size() ? ps.at[i + 1] : ps.words.size());
-                const int same = words_same_store(dw().writes[i], ps.words.data() + ps.at[i], end);
+                const int same = words_same_store(wr.writes[i], ps.words.data() + ps.at[i], end);
                 if (same < 0) {   // (not so: nothing is known of what is pushed; the whole set again)
                     ps.cmd = VK_NULL_HANDLE;
                     return bind_descriptors(cmd, bp, p);
                 }
-                if (!same) changed.push_back(dw().writes[i]);
+                if (!same) changed.push_back(wr.writes[i]);
             }
         }
         if (!changed.empty()) {
@@ -3180,7 +3188,7 @@ bool bind_descriptors(VkCommandBuffer cmd, VkPipelineBindPoint bp, const Program
     ps.cmd = VK_NULL_HANDLE;   // (a set bound: what was pushed is not known to stay)
     if (g_fine) {
         fine_n[FC_POOL_SETS]++;
-        for (const VkWriteDescriptorSet& w : dw().writes) fine_n[FC_POOL_DESCS] += w.descriptorCount;
+        for (const VkWriteDescriptorSet& w : wr.writes) fine_n[FC_POOL_DESCS] += w.descriptorCount;
     }
     VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorPool = cur->extra.empty() ? cur->pool : cur->extra.back();
@@ -3192,8 +3200,8 @@ bool bind_descriptors(VkCommandBuffer cmd, VkPipelineBindPoint bp, const Program
         ai.descriptorPool = cur->extra.back();
         if (vkAllocateDescriptorSets(dev.device, &ai, &set) != VK_SUCCESS) return false;
     }
-    for (auto& w : dw().writes) w.dstSet = set;
-    vkUpdateDescriptorSets(dev.device, (uint32_t)dw().writes.size(), dw().writes.data(), 0, nullptr);
+    for (auto& w : wr.writes) w.dstSet = set;
+    vkUpdateDescriptorSets(dev.device, (uint32_t)wr.writes.size(), wr.writes.data(), 0, nullptr);
     vkCmdBindDescriptorSets(cmd, bp, p.layout, 0, 1, &set, 0, nullptr);
     return true;
 }
@@ -3691,9 +3699,10 @@ bool targets_persistent(const Targets& at) {
 }
 
 void begin_pass(VkCommandBuffer cmd, const Targets& at) {
-    bool same = pass().open && pass().depth == at.depth_view && pass().n == at.n && pass().width == at.width &&
-                pass().height == at.height;
-    for (int i = 0; i < at.n && same; i++) same = pass().color[i] == at.color_view[i];
+    Pass& ps = pass();   // One TLS accessor for this recording thread's pass state.
+    bool same = ps.open && ps.depth == at.depth_view && ps.n == at.n && ps.width == at.width &&
+                ps.height == at.height;
+    for (int i = 0; i < at.n && same; i++) same = ps.color[i] == at.color_view[i];
     if (same) return;
     end_pass(cmd);
     full_barrier(cmd, "barrier (pass start)");   // (what the pass before wrote, and the transfers before it)
@@ -3703,7 +3712,7 @@ void begin_pass(VkCommandBuffer cmd, const Targets& at) {
             if (at.stand_in >> i & 1) texture_stand_in_copy(cmd, at.color[i], at.color_view[i], true);
         full_barrier(cmd, "barrier (stand-in in)");
     }
-    pass().stand_in = at.stand_in;
+    ps.stand_in = at.stand_in;
     VkRenderingAttachmentInfo ca[8]{};
     bool marks = !texture_marked(at.depth);
     for (int i = 0; i < at.n && !marks; i++) marks = !texture_marked(at.color[i]);
@@ -3714,12 +3723,12 @@ void begin_pass(VkCommandBuffer cmd, const Targets& at) {
         ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        pass().color[i] = at.color_view[i];
-        pass().tex[i] = at.color[i], pass().level[i] = at.color_level[i], pass().layer[i] = at.color_layer[i];
+        ps.color[i] = at.color_view[i];
+        ps.tex[i] = at.color[i], ps.level[i] = at.color_level[i], ps.layer[i] = at.color_layer[i];
         texture_written(at.color[i]);
         texture_rendered(at.color[i]);
     }
-    for (int i = at.n; i < 8; i++) pass().color[i] = VK_NULL_HANDLE;
+    for (int i = at.n; i < 8; i++) ps.color[i] = VK_NULL_HANDLE;
     VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     if (at.depth) {
         da.imageView = at.depth_view;
@@ -3729,9 +3738,9 @@ void begin_pass(VkCommandBuffer cmd, const Targets& at) {
         texture_written(at.depth);
         texture_rendered(at.depth);
     }
-    pass().depth = at.depth_view;
-    pass().depth_tex = at.depth, pass().depth_level = at.depth_level, pass().depth_layer = at.depth_layer;
-    pass().n = at.n, pass().width = at.width, pass().height = at.height;
+    ps.depth = at.depth_view;
+    ps.depth_tex = at.depth, ps.depth_level = at.depth_level, ps.depth_layer = at.depth_layer;
+    ps.n = at.n, ps.width = at.width, ps.height = at.height;
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea = {{0, 0}, {at.width, at.height}};
     ri.layerCount = 1;
@@ -3740,12 +3749,12 @@ void begin_pass(VkCommandBuffer cmd, const Targets& at) {
     if (at.depth && depth_aspect(at.depth_format)) ri.pDepthAttachment = &da;
     if (at.depth && has_stencil(at.depth_format)) ri.pStencilAttachment = &da;
     gprof_begin(cmd);
-    pass().draws = 0, pass().format0 = at.n ? at.color_format[0] : at.depth_format;
-    pass().wm_or = 0, pass().wm_n = 0;
-    pass().clears = 0, pass().first_prog = 0;
-    pass().sampled.clear(), pass().sampled_targets = 0, pass().written = 0;
+    ps.draws = 0, ps.format0 = at.n ? at.color_format[0] : at.depth_format;
+    ps.wm_or = 0, ps.wm_n = 0;
+    ps.clears = 0, ps.first_prog = 0;
+    ps.sampled.clear(), ps.sampled_targets = 0, ps.written = 0;
     vkCmdBeginRendering(cmd, &ri);
-    pass().open = true;
+    ps.open = true;
     st_passes++;
 }
 
@@ -3829,13 +3838,14 @@ int dyn_pack(const NvnState& s, const Targets& at, VkPrimitiveTopology topo, boo
 }
 
 void dynamic_state(VkCommandBuffer cmd, const NvnState& s, const Targets& at, VkPrimitiveTopology topo, bool mesh) {
+    Pass& ps = pass();   // One TLS accessor for this recording thread's pass state.
     float df[kDynF];
     uint32_t du[kDynU];
     uint8_t db[160];
     const int nb = dyn_pack(s, at, topo, mesh, df, du, db);
     if (!dump_on() && last_dyn_valid && dyn_fast.on && dyn_fast.nb == nb &&
         dyn_same(df, kDynF, du, kDynU, db, nb, dyn_fast.fp, dyn_fast.up, dyn_fast.raw)) {
-        pass().wm_or |= dyn_fast.wm0, pass().wm_n = dyn_fast.wm_n;   // (the pass trace still sees the masks)
+        ps.wm_or |= dyn_fast.wm0, ps.wm_n = dyn_fast.wm_n;   // (the pass trace still sees the masks)
         FINE_N(FC_DYN_FAST, 1);
         return;
     }
@@ -4054,7 +4064,7 @@ void dynamic_state(VkCommandBuffer cmd, const NvnState& s, const Targets& at, Vk
     std::memcpy(dyn_fast.up, du, sizeof du);
     std::memcpy(dyn_fast.raw, db, (size_t)nb);
     dyn_fast.wm0 = d.n ? (uint32_t)d.wm[0] : 0, dyn_fast.wm_n = (uint32_t)d.n;
-    pass().wm_or |= dyn_fast.wm0, pass().wm_n = dyn_fast.wm_n;
+    ps.wm_or |= dyn_fast.wm0, ps.wm_n = dyn_fast.wm_n;
 }
 #undef DYN_CHANGED
 
@@ -4192,14 +4202,15 @@ bool writes_sampled_target(uint16_t writes, uint16_t sampled_targets) {
 /// the targets' writes with each other only, not with the draws' texture reads of them. (A draw that samples a target
 /// it writes itself is left as it is.) Returns the targets the draw writes. RX_VK_NO_PASS_HAZARDS=1: not checked.
 uint16_t draw_hazards(VkCommandBuffer cmd, const Program& p, const NvnState& s, const Targets& at) {
+    Pass& ps = pass();   // One TLS accessor for this recording thread's pass state.
     uint16_t writes = 0;
     for (int i = 0; i < at.n; i++)
         if (at.color[i] && target_write_mask(p, s, i)) writes |= (uint16_t)(1u << i);
     if (at.depth && s.ds.dw) writes |= 1u << 8;
     static const bool off = getenv("RX_VK_NO_PASS_HAZARDS") != nullptr;
-    if (off || !pass().open) return writes;
-    bool same = pass().depth == at.depth_view && pass().n == at.n && pass().width == at.width && pass().height == at.height;
-    for (int i = 0; i < at.n && same; i++) same = pass().color[i] == at.color_view[i];
+    if (off || !ps.open) return writes;
+    bool same = ps.depth == at.depth_view && ps.n == at.n && ps.width == at.width && ps.height == at.height;
+    for (int i = 0; i < at.n && same; i++) same = ps.color[i] == at.color_view[i];
     if (!same) return writes;   // (other targets: begin_pass ends this pass with a barrier anyway)
     auto slot_of = [&](const Texture* t) {
         for (int i = 0; i < at.n; i++)
@@ -4209,15 +4220,15 @@ uint16_t draw_hazards(VkCommandBuffer cmd, const Program& p, const NvnState& s, 
     const char* kind = nullptr;
     for (const Texture* t : gfx_sampled()) {
         const int k = slot_of(t);
-        if (k >= 0 && (pass().written >> k & 1) && !(writes >> k & 1)) { kind = "samples a target the pass wrote"; break; }
+        if (k >= 0 && (ps.written >> k & 1) && !(writes >> k & 1)) { kind = "samples a target the pass wrote"; break; }
     }
-    if (!kind && writes_sampled_target(writes, pass().sampled_targets))
+    if (!kind && writes_sampled_target(writes, ps.sampled_targets))
         kind = "writes a target an earlier draw sampled";
     if (!kind) return writes;
     static int logged;
     if (logged++ < 8)
         logf("vk: a draw (program %016llx) %s, after %d draws of the pass (%ux%u): a pass of its own", (unsigned long long)p.key,
-             kind, pass().draws, pass().width, pass().height);
+             kind, ps.draws, ps.width, ps.height);
     end_pass(cmd);
     return writes;
 }
@@ -4591,15 +4602,16 @@ namespace {
 TLS_OBJECT(dump_mesh_indirect, std::vector<std::pair<uint64_t, uint64_t>>)   // (program key, indirect address)
 } // namespace
 void end_pass(VkCommandBuffer cmd) {
-    if (!pass().open) return;
+    Pass& ps = pass();   // One TLS accessor for this recording thread's pass state.
+    if (!ps.open) return;
     vkCmdEndRendering(cmd);
-    pass().open = false;
-    if (pass().stand_in) {   // (relink, issue 21) what the pass rendered into stand-ins, back into the compressed targets
+    ps.open = false;
+    if (ps.stand_in) {   // (relink, issue 21) what the pass rendered into stand-ins, back into the compressed targets
         full_barrier(cmd, "barrier (stand-in out)");
-        for (int i = 0; i < pass().n; i++)
-            if (pass().stand_in >> i & 1) texture_stand_in_copy(cmd, pass().tex[i], pass().color[i], false);
+        for (int i = 0; i < ps.n; i++)
+            if (ps.stand_in >> i & 1) texture_stand_in_copy(cmd, ps.tex[i], ps.color[i], false);
         full_barrier(cmd, "barrier (stand-in out)");
-        pass().stand_in = 0;
+        ps.stand_in = 0;
     }
     if (dump_on() && !dump_mesh_indirect().empty()) {
         for (const auto& [key, addr] : dump_mesh_indirect()) {
@@ -4611,51 +4623,51 @@ void end_pass(VkCommandBuffer cmd) {
         dump_mesh_indirect().clear();
     }
     if (probe_on())
-        for (int i = 0; i < pass().n; i++)
-            if (pass().color[i] && pass().tex[i]) probe_image(cmd, pass().tex[i], pass().level[i], pass().layer[i], pass().prog, 'p', pass().draws);
+        for (int i = 0; i < ps.n; i++)
+            if (ps.color[i] && ps.tex[i]) probe_image(cmd, ps.tex[i], ps.level[i], ps.layer[i], ps.prog, 'p', ps.draws);
     if (pass_trace_on()) {
         char sampled[160] = "";
         int k = 0;
-        for (size_t i = 0; i < pass().sampled.size() && i < 6 && k < 140; i++)
-            k += snprintf(sampled + k, sizeof sampled - k, " %#llx", (unsigned long long)pass().sampled[i]->gpu);
+        for (size_t i = 0; i < ps.sampled.size() && i < 6 && k < 140; i++)
+            k += snprintf(sampled + k, sizeof sampled - k, " %#llx", (unsigned long long)ps.sampled[i]->gpu);
         trace_line("pass %ux%u f%d %dc%s wm%x/%u: %d draws %d clears, c0 %#llx/%u, depth %#llx/%u, progs %016llx..%016llx, "
-                   "sampled%s", pass().width, pass().height, (int)pass().format0, pass().n, pass().depth ? "+d" : "", pass().wm_or, pass().wm_n, pass().draws,
-                   pass().clears, (unsigned long long)(pass().n && pass().tex[0] ? pass().tex[0]->gpu : 0), pass().layer[0],
-                   (unsigned long long)(pass().depth_tex ? pass().depth_tex->gpu : 0), pass().depth_layer,
-                   (unsigned long long)pass().first_prog, (unsigned long long)pass().prog, sampled);
+                   "sampled%s", ps.width, ps.height, (int)ps.format0, ps.n, ps.depth ? "+d" : "", ps.wm_or, ps.wm_n, ps.draws,
+                   ps.clears, (unsigned long long)(ps.n && ps.tex[0] ? ps.tex[0]->gpu : 0), ps.layer[0],
+                   (unsigned long long)(ps.depth_tex ? ps.depth_tex->gpu : 0), ps.depth_layer,
+                   (unsigned long long)ps.first_prog, (unsigned long long)ps.prog, sampled);
     }
     if (gprof_on()) {
         char label[160];
-        snprintf(label, sizeof label, "pass %ux%u f%d %dc%s, %s draws, first prog %016llx, last prog %016llx", pass().width, pass().height,
-                 (int)pass().format0, pass().n, pass().depth ? "+d" : "", pass().draws > 256 ? ">256" : pass().draws > 32 ? "33-256" : pass().draws > 4 ? "5-32" : "0-4",
-                 (unsigned long long)pass().first_prog, (unsigned long long)pass().prog);
-        gprof_end(cmd, label, pass().draws);
+        snprintf(label, sizeof label, "pass %ux%u f%d %dc%s, %s draws, first prog %016llx, last prog %016llx", ps.width, ps.height,
+                 (int)ps.format0, ps.n, ps.depth ? "+d" : "", ps.draws > 256 ? ">256" : ps.draws > 32 ? "33-256" : ps.draws > 4 ? "5-32" : "0-4",
+                 (unsigned long long)ps.first_prog, (unsigned long long)ps.prog);
+        gprof_end(cmd, label, ps.draws);
     }
     if (dump_on())
-        for (int i = 0; i < pass().n; i++)
-            if (pass().color[i] && pass().tex[i]) {
+        for (int i = 0; i < ps.n; i++)
+            if (ps.color[i] && ps.tex[i]) {
                 char what[64];
-                snprintf(what, sizeof what, "pass c%d prog %016llx", i, (unsigned long long)pass().prog);
-                dump_image(cmd, pass().tex[i], pass().level[i], pass().layer[i], what);
+                snprintf(what, sizeof what, "pass c%d prog %016llx", i, (unsigned long long)ps.prog);
+                dump_image(cmd, ps.tex[i], ps.level[i], ps.layer[i], what);
             }
-    if (dump_on() && pass().depth && pass().depth_tex) {
+    if (dump_on() && ps.depth && ps.depth_tex) {
         char what[64];
-        snprintf(what, sizeof what, "pass depth prog %016llx", (unsigned long long)pass().prog);
-        dump_image(cmd, pass().depth_tex, pass().depth_level, pass().depth_layer, what);
+        snprintf(what, sizeof what, "pass depth prog %016llx", (unsigned long long)ps.prog);
+        dump_image(cmd, ps.depth_tex, ps.depth_level, ps.depth_layer, what);
     }
     if (dump_on())
         for (Texture* t : dump_sampled()) {
             char what[64];
-            snprintf(what, sizeof what, "sampled by %016llx", (unsigned long long)pass().prog);
+            snprintf(what, sizeof what, "sampled by %016llx", (unsigned long long)ps.prog);
             for (uint32_t l = 0; l < std::min<uint32_t>(t->layers, 2); l++) dump_image(cmd, t, 0, l, what);
             if (t->guest_size >= (8u << 20)) texture_log_guest(t);   // (and what the game's memory holds of it)
             for (uint32_t lv = 1; t->layers == 1 && lv < std::min<uint32_t>(t->levels, 8); lv++) {   // (every level)
-                snprintf(what, sizeof what, "sampled by %016llx level %u", (unsigned long long)pass().prog, lv);
+                snprintf(what, sizeof what, "sampled by %016llx level %u", (unsigned long long)ps.prog, lv);
                 dump_image(cmd, t, lv, 0, what);
             }
         }
     dump_sampled().clear();
-    pass().prog = 0;
+    ps.prog = 0;
 }
 
 const std::vector<uint64_t>& record_progs();
@@ -5602,8 +5614,53 @@ bool fallback_compute_pipelines(Program& p) {
     return true;
 }
 
+/// (relink, issue 640, RX_VK_LOG_FALLBACK=1) What the fallback's mesh draws ask for against what it runs: task workgroups (or mesh
+/// workgroups without a task) asked and dispatched, the draws cut, the indirect draws' entries past the first. The indirect counts are
+/// read from guest memory as the CPU sees them (the GPU's culling may have written others since). 30 cut draws, then a line every
+/// 4000 fallback draws
+void fallback_note(const Program& p, const DrawArgs& d, uint32_t capacity) {
+    static const bool on = getenv("RX_VK_LOG_FALLBACK") && atoi(getenv("RX_VK_LOG_FALLBACK")) != 0;
+    if (!on) return;
+    const uint32_t threads = p.fallback_task ? std::max(1u, p.fallback_task_threads) : 1u;
+    const uint32_t most = p.fallback_task ? std::max(1u, capacity / threads) : capacity;   // (workgroups one dispatch runs)
+    uint64_t asked = 0, run = 0;
+    uint32_t entries = 1;
+    if (d.indirect) {
+        entries = (uint32_t)std::max(d.max, 1);
+        const uint32_t stride = d.stride > 0 ? (uint32_t)d.stride : 8;
+        for (uint32_t i = 0; i < std::min(entries, 64u); i++) {
+            uint32_t count = 0;
+            host->gpu_read(d.indirect + (uint64_t)i * stride, &count, 4);
+            asked += count;
+            if (i == 0) run = std::min(count, most);
+        }
+    } else {
+        asked = (uint32_t)std::max(d.groups[0], 0);
+        run = std::min<uint64_t>(asked, most);
+    }
+    static std::atomic<uint64_t> draws{0}, cut{0}, indirect{0}, multi{0}, asked_all{0}, run_all{0}, most_asked{0};
+    const uint64_t n = ++draws;
+    indirect += d.indirect != 0, multi += entries > 1, asked_all += asked, run_all += run;
+    uint64_t was = most_asked.load();
+    while (asked > was && !most_asked.compare_exchange_weak(was, asked)) {}
+    if (asked > run) {
+        static std::atomic<int> told{0};
+        cut++;
+        if (told++ < 30)
+            logf("vk: fallback: draw of %016llx cut: %s%s, %llu %s workgroups asked in %u entr%s, %llu run (a dispatch holds %u; groups word %d)",
+                 (unsigned long long)p.key, d.indirect ? "indirect" : "direct", p.fallback_task ? ", task" : "", (unsigned long long)asked,
+                 p.fallback_task ? "task" : "mesh", entries, entries == 1 ? "y" : "ies", (unsigned long long)run, most, d.groups[0]);
+    }
+    if (n % 4000 == 0)
+        logf("vk: fallback: %llu mesh draws, %llu cut, %llu indirect (%llu with more than one entry); workgroups asked %llu, run %llu, "
+             "largest draw %llu", (unsigned long long)n, (unsigned long long)cut.load(), (unsigned long long)indirect.load(),
+             (unsigned long long)multi.load(), (unsigned long long)asked_all.load(), (unsigned long long)run_all.load(),
+             (unsigned long long)most_asked.load());
+}
+
 /// The dispatches of a mesh draw, outside any render pass, and the vertex count its graphics draw then covers.
 bool fallback_record(VkCommandBuffer cmd, Program& p, const DrawArgs& d) {
+    fallback_note(p, d, Shader::Backend::SPIRV::MESH_FALLBACK_CAPACITY);
     if (d.count_addr) {   // (more than one draw in the records: each its own dispatch, not one)
         static std::atomic<int> told{0};
         if (told++ < 2) logf("vk: fallback: a mesh draw with a count buffer is left out (issue 640)");
@@ -5630,9 +5687,13 @@ bool fallback_record(VkCommandBuffer cmd, Program& p, const DrawArgs& d) {
     const bool indirect{d.indirect && mesh_conv_buf != VK_NULL_HANDLE};
     const uint32_t groups{(uint32_t)std::clamp(d.groups[0], 0, (int)capacity)};
     // (a task workgroup's slots are wg * threads + thread: those past the buffer are not started)
+    // (an indirect draw's task workgroups are counted on the GPU, and its groups word is 0: its mesh stage was dispatched for no
+    // slot at all, and every indirect task + mesh draw drew nothing (RX_VK_LOG_FALLBACK=1: Kokiri's cliffs and the rocks round the
+    // village's entrance, 107 to 130 task workgroups a draw). All the slots then: those its task did not start cull themselves)
     const uint32_t slots{p.fallback_task
-                             ? (uint32_t)std::min<uint64_t>(
-                                   (uint64_t)groups * std::max(1u, p.fallback_task_threads), capacity)
+                             ? d.indirect ? capacity
+                                          : (uint32_t)std::min<uint64_t>(
+                                                (uint64_t)groups * std::max(1u, p.fallback_task_threads), capacity)
                              : 0};
     auto send = [&](size_t stage, bool mesh_stage) {
         if (stage >= p.fallback_compute.size() || !p.fallback_compute[stage]) return false;
@@ -5980,6 +6041,7 @@ void tex_of_note(const NvnState& s, const Program& p, const Targets* at, const N
 }
 
 void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
+    Pass& ps = pass();   // One TLS accessor for this recording thread's pass state.
     PROF_HOT(PROF_DRAW);
     FINE_N(FC_DRAWS, 1);
     stats_tick();
@@ -6334,11 +6396,11 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         if (seen2.size() < 400 && seen2.insert(sig).second) {
             char line[300];
             int k = snprintf(line, sizeof line, "vk: targets frame %llu prog %016llx pass draw %d: depth #%d dt %d dw %d, colour",
-                             (unsigned long long)texture_frame_no(), (unsigned long long)p.key, pass().draws,
+                             (unsigned long long)texture_frame_no(), (unsigned long long)p.key, ps.draws,
                              at.depth ? (int)at.depth->id : -1, (int)s.ds.dt, (int)s.ds.dw);
             for (int i = 0; i < at.n && k < 250; i++)
                 k += snprintf(line + k, sizeof line - k, " #%d", at.color[i] ? (int)at.color[i]->id : -1);
-            k += snprintf(line + k, sizeof line - k, "; pass first prog %016llx", (unsigned long long)pass().first_prog);
+            k += snprintf(line + k, sizeof line - k, "; pass first prog %016llx", (unsigned long long)ps.first_prog);
             logf("%s", line);
         }
     }
@@ -6443,20 +6505,20 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         vkCmdBeginQuery(cmd, d.occ_pool, d.occ_query, dev.occlusion_precise ? VK_QUERY_CONTROL_PRECISE_BIT : 0);
         occ_guard.cmd = cmd, occ_guard.pool = d.occ_pool, occ_guard.q = d.occ_query;
     }
-    probe_draw(s, p, pass().draws);   // (relink: RX_VK_PROBE)
+    probe_draw(s, p, ps.draws);   // (relink: RX_VK_PROBE)
     gprof_run(cmd, p.key);   // (RX_VK_PASS_TIMING=2)
-    pass().prog = p.key;
-    if (!pass().first_prog) pass().first_prog = p.key;
+    ps.prog = p.key;
+    if (!ps.first_prog) ps.first_prog = p.key;
     for (const Texture* t : gfx_sampled()) {
-        if (std::find(pass().sampled.begin(), pass().sampled.end(), t) != pass().sampled.end()) continue;
-        pass().sampled.push_back(t);
+        if (std::find(ps.sampled.begin(), ps.sampled.end(), t) != ps.sampled.end()) continue;
+        ps.sampled.push_back(t);
         int slot = -1;
         for (int i = 0; i < at.n; i++)
             if (at.color[i] == t) { slot = i; break; }
         if (slot < 0 && at.depth == t) slot = 8;
-        if (slot >= 0) pass().sampled_targets |= (uint16_t)(1u << slot);
+        if (slot >= 0) ps.sampled_targets |= (uint16_t)(1u << slot);
     }
-    pass().written |= writes;
+    ps.written |= writes;
     if (pl != last_pipeline) {
         FINE_SCOPE(FT_BINDPL);
         FINE_N(FC_BIND_PIPE, 1);
@@ -6550,7 +6612,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         if (p.fallback) {   // (relink: the generated vertex stage reads the records; one vertex a corner)
             if (fallback_vertex_count) vkCmdDraw(cmd, fallback_vertex_count, 1, 0, 0);
             st_mesh++;
-            st_draws++, pass().draws++;
+            st_draws++, ps.draws++;
             return;
         }
         {   // (amd-fix, diagnosis) RX_VK_LOG_MESH_PROGS=1: each mesh program's first draw and every 600th, with what its
@@ -6658,7 +6720,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
                     vkCmdDrawMeshTasksIndirectEXT(cmd, mesh_conv_buf, mesh_conv_off, std::max(d.max, 1), 12);
                 mesh_conv_buf = VK_NULL_HANDLE;
                 st_mesh++;
-                st_draws++, pass().draws++;
+                st_draws++, ps.draws++;
                 return;
             }
             if (!mesh_args.buffer) {
@@ -6688,7 +6750,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
                                   (uint32_t)std::max(d.groups[2], 1));
         }
         st_mesh++;
-        st_draws++, pass().draws++;
+        st_draws++, ps.draws++;
         return;
     }
     // vertex streams (from their pools, strides dynamic) and the zero stream
@@ -6777,7 +6839,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         bind_index(cmd, cur->stream, at6, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(cmd, quads * 6, (uint32_t)std::max(1, d.instances), 0, d.indexed ? d.base_vertex : 0,
                          (uint32_t)d.base_instance);
-        st_draws++, pass().draws++;
+        st_draws++, ps.draws++;
         return;
     }
     if (d.indirect) {
@@ -6810,7 +6872,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         FINE_SCOPE(FT_DRAWCALL);
         vkCmdDraw(cmd, (uint32_t)d.count, (uint32_t)std::max(1, d.instances), (uint32_t)d.first, (uint32_t)d.base_instance);
     }
-    st_draws++, pass().draws++;
+    st_draws++, ps.draws++;
 }
 
 /// A dispatch over 2 ms is logged, 60 times, and only while RX_VK_SLOW_DISPATCH is set. Off, the clock is not read.
@@ -7523,41 +7585,135 @@ size_t warm_run(void (*progress)(size_t done, size_t total), size_t after) {
     for (const auto& n : notes) wanted.insert(n->prog);
     const size_t programs_n = program_cache_load_some(wanted, [](Program& p) { ensure_layout(p); }, false);
     const double read_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    std::atomic<size_t> next{0}, done{0}, made{0};
+    // (relink, issue 80) A pipeline the driver never returns from held the start for good: AMD's on an RX 6600 / 6600 XT stopped
+    // at "pipelines 8517 of 13329" (3 short of the warm-up's 8520) and at "1139 of 5951", the CPU idle, for over an hour. The
+    // workers looked at the time budget only between pipelines, and the start joined them all. Now the workers' state is on the
+    // heap and this thread watches: nothing finished for RX_VK_WARM_STALL_S seconds (30; 0: wait, as before), or the budget spent,
+    // and the start goes on without the ones still inside the driver (let go, never freed). Those are named in the log and kept in
+    // <marker>.stuck, which the next starts leave out of the warm-up (they are built in play when first drawn, as any other)
+    struct Warm {
+        std::vector<std::unique_ptr<PipeNote>> notes;
+        std::atomic<size_t> next{0}, done{0}, made{0};
+        std::atomic<int> alive{0};
+        std::atomic<bool> stop{false};
+        std::unique_ptr<std::atomic<int64_t>[]> current;   // (each worker's note, -1 between them)
+        std::unique_ptr<std::atomic<int64_t>[]> since;     // (when it went into the driver for it, steady ns)
+    };
+    const std::string stuck_path = path + ".stuck";
+    std::unordered_set<uint64_t> stuck_before;
+    if (FILE* f = fopen(stuck_path.c_str(), "rb")) {
+        unsigned long long k;
+        while (fscanf(f, "%llx", &k) == 1) stuck_before.insert((uint64_t)k);
+        fclose(f);
+    }
+    auto w = std::make_shared<Warm>();
+    size_t skipped_stuck = 0;
+    for (const auto& n : notes) {   // (the notes are read again for the heap: the warm-up's own copy, kept by stuck workers)
+        if (stuck_before.count(n->key)) { skipped_stuck++; continue; }
+        w->notes.push_back(std::make_unique<PipeNote>(*n));
+    }
+    if (skipped_stuck) logf("vk: warm-up: %zu pipelines left out, the driver never returned from them before (%s)", skipped_stuck,
+                            stuck_path.c_str());
     static const int budget_s = getenv("RX_VK_WARM_S") ? atoi(getenv("RX_VK_WARM_S")) : 600;
-    std::atomic<bool> out_of_time{false};
-    const auto worker = [&] {
+    static const int stall_s = getenv("RX_VK_WARM_STALL_S") ? atoi(getenv("RX_VK_WARM_STALL_S")) : 30;
+    // (one pipeline in the driver for RX_VK_WARM_PIPE_S seconds (60; 0: no such limit) is taken as stuck at once: noted in
+    // <marker>.stuck and a new worker started in its place. On this RX 6600 XT six of eight workers were stuck so: the two left
+    // kept the progress going, slowly, so the stall rule never fired and the warm-up spent its whole budget at a quarter speed)
+    static const int pipe_s = getenv("RX_VK_WARM_PIPE_S") ? atoi(getenv("RX_VK_WARM_PIPE_S")) : 60;
+    const unsigned cpus = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned nthreads = std::min(cpus, 64u), slots = nthreads * 4;   // (room for the workers that replace stuck ones)
+    w->current.reset(new std::atomic<int64_t>[slots]);
+    w->since.reset(new std::atomic<int64_t>[slots]);
+    for (unsigned k = 0; k < slots; k++) w->current[k] = -1, w->since[k] = 0;
+    const auto steady_ns = [] {
+        return (int64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    const auto worker = [w, steady_ns](unsigned k) {
         ub_thread_off();   // (a background thread: see ub_thread_off)
         driver_cache_only = true;
         for (;;) {
-            if (prepare_stopped()) return;
-            if (budget_s > 0 && std::chrono::steady_clock::now() - t0 > std::chrono::seconds(budget_s)) {
-                out_of_time = true;
-                return;
+            if (prepare_stopped() || w->stop.load(std::memory_order_relaxed)) break;
+            const size_t i = w->next++;
+            if (i >= w->notes.size()) break;
+            const PipeNote& n = *w->notes[i];
+            w->since[k] = steady_ns();
+            w->current[k] = (int64_t)i;
+            {   // (a test, on a PC whose driver returns from everything: RX_VK_WARM_TEST_STUCK=<n> makes every n-th noted
+                // pipeline one the "driver" never returns from, so the rules above can be seen at work)
+                static const long long test_stuck = getenv("RX_VK_WARM_TEST_STUCK") ? atoll(getenv("RX_VK_WARM_TEST_STUCK")) : 0;
+                if (test_stuck > 0 && i % (size_t)test_stuck == (size_t)test_stuck - 1)
+                    for (;;) Sleep(1000);
             }
-            const size_t i = next++;
-            if (i >= notes.size()) return;
-            const PipeNote& n = *notes[i];
             if (const Program* p = program_find(n.prog, n.variant))
                 if (const VkPipeline pl = build_graphics(*p, n.s, note_targets(n), (VkPrimitiveTopology)n.topo))
-                    vkDestroyPipeline(dev.device, pl, nullptr), made++;
-            done++;
+                    vkDestroyPipeline(dev.device, pl, nullptr), w->made++;
+            w->current[k] = -1;
+            w->done++;
         }
+        w->alive--;
     };
     std::vector<std::thread> threads;
-    const unsigned cpus = std::max(1u, std::thread::hardware_concurrency());
-    for (unsigned i = 0; i < std::min(cpus, 64u); i++) threads.emplace_back(worker);
-    while (next.load() < notes.size() + threads.size() && !prepare_stopped() && !out_of_time.load()) {
-        if (progress) progress(done.load(), notes.size() + after);
+    std::vector<bool> stuck(slots, false);
+    std::vector<uint64_t> stuck_keys;
+    std::string stuck_names;
+    const auto note_stuck = [&](unsigned k) {   // (named in the log and kept in the file at once: a crash later keeps it too)
+        const int64_t i = w->current[k].load();
+        if (i < 0 || stuck[k]) return false;
+        stuck[k] = true;
+        const PipeNote& n = *w->notes[(size_t)i];
+        stuck_keys.push_back(n.key);
+        char one[96];
+        snprintf(one, sizeof one, "%s%016llx (pipeline %016llx)", stuck_names.empty() ? "" : ", ", (unsigned long long)n.prog,
+                 (unsigned long long)n.key);
+        if (stuck_names.size() < 1500) stuck_names += one;
+        if (FILE* f = fopen(stuck_path.c_str(), "ab")) fprintf(f, "%016llx\n", (unsigned long long)n.key), fclose(f);
+        return true;
+    };
+    w->alive = (int)nthreads;
+    for (unsigned k = 0; k < nthreads; k++) threads.emplace_back(worker, k);
+    size_t last_done = 0, stuck_n = 0;
+    auto last_change = std::chrono::steady_clock::now();
+    bool out_of_time = false, stalled = false;
+    while (w->alive.load() > (int)stuck_n && !prepare_stopped()) {
+        if (progress) progress(w->done.load(), w->notes.size() + skipped_stuck + after);
         Sleep(100);
+        const auto t = std::chrono::steady_clock::now();
+        if (pipe_s > 0) {
+            const int64_t now_ns = steady_ns();
+            for (unsigned k = 0; k < (unsigned)threads.size(); k++)
+                if (!stuck[k] && w->current[k].load() >= 0 && now_ns - w->since[k].load() > pipe_s * 1000000000LL && note_stuck(k)) {
+                    stuck_n++;
+                    logf("vk: warm-up: pipeline %016llx in the driver for over %d s: left behind, a new worker in its place",
+                         (unsigned long long)stuck_keys.back(), pipe_s);
+                    if (threads.size() < slots) w->alive++, threads.emplace_back(worker, (unsigned)threads.size());
+                }
+        }
+        if (budget_s > 0 && t - t0 > std::chrono::seconds(budget_s)) { out_of_time = true; break; }
+        if (w->done.load() != last_done) last_done = w->done.load(), last_change = t;
+        else if (stall_s > 0 && t - last_change > std::chrono::seconds(stall_s)) { stalled = true; break; }
     }
-    for (std::thread& t : threads) t.join();
-    const bool whole = !prepare_stopped() && !out_of_time.load();
+    w->stop = true;
+    {   // (the workers between pipelines stop at once; give the others a moment, then let go of those still in the driver)
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (w->alive.load() > 0 && std::chrono::steady_clock::now() < until) Sleep(20);
+    }
+    const bool all_out = w->alive.load() == 0;
+    if (all_out) {
+        for (std::thread& t : threads) t.join();
+    } else {
+        for (std::thread& t : threads) t.detach();
+        for (unsigned k = 0; k < (unsigned)threads.size(); k++) note_stuck(k);   // (those the budget or the stall rule left)
+    }
+    if (!stuck_keys.empty())
+        logf("vk: warm-up: %zu pipeline%s the driver did not return from, left behind (program %s); the game starts, and the next "
+             "starts leave them out%s", stuck_keys.size(), stuck_keys.size() == 1 ? "" : "s", stuck_names.c_str(),
+             out_of_time ? " (the warm-up's time budget, RX_VK_WARM_S, ran out)" : stalled ? " (nothing finished for RX_VK_WARM_STALL_S)" : "");
+    const bool whole = !prepare_stopped() && !out_of_time && !stalled && all_out && stuck_keys.empty();
     if (whole)
         if (FILE* f = fopen(path.c_str(), "wb")) fprintf(f, "%s\n", now.c_str()), fclose(f);
-    logf("vk: warmed the driver's cache: %zu of %zu noted pipelines made in %.1f s (%.1f s of it %zu programs read)%s", made.load(),
-         notes.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), read_s, programs_n,
-         whole ? "" : " (stopped before the end: the rest are made in play, and the next start goes on)");
+    logf("vk: warmed the driver's cache: %zu of %zu noted pipelines made in %.1f s (%.1f s of it %zu programs read)%s",
+         w->made.load(), notes.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), read_s,
+         programs_n, whole ? "" : " (stopped before the end: the rest are made in play, and the next start goes on)");
     return notes.size();
 }
 
@@ -7674,6 +7830,10 @@ void precompile_run(void (*progress)(size_t done, size_t total)) {
         auto& computes = pre->computes;
         for (;;) {
             if (prepare_stopped()) return;
+            {   // (relink: the game went on without them: the others stop too, and leave the GPU and CPU to it)
+                std::lock_guard lk(pre->mu);
+                if (pre->abandoned) return;
+            }
             const size_t i = pre->next++;
             if (i >= total) return;
             if (i < computes.size()) {
@@ -7722,11 +7882,13 @@ void precompile_run(void (*progress)(size_t done, size_t total)) {
         if (next.load() >= total + threads.size()) break;
         const auto now = std::chrono::steady_clock::now();
         if (done.load() != last_done) last_done = done.load(), last_change = now;
-        else if (stall_s > 0 && next.load() >= total && now - last_change > std::chrono::seconds(stall_s)) {
+        // (relink, issue 80: whether or not every pipeline was handed out. With every worker inside the driver none was, and the
+        // start waited for good)
+        else if (stall_s > 0 && now - last_change > std::chrono::seconds(stall_s)) {
             std::lock_guard lk(pre->mu);
             pre->abandoned = true;
             gone_on = true;
-            logf("vk: precompile: %zu of %zu done, nothing finished for %d s: the game starts, the rest go on behind it", done.load(),
+            logf("vk: precompile: %zu of %zu done, nothing finished for %d s: the game starts, the rest are made in play", done.load(),
                  total, stall_s);
             break;
         }

@@ -72,6 +72,7 @@ struct Device {
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     VkFormat swap_format = VK_FORMAT_UNDEFINED;
+    VkPresentModeKHR swap_mode = VK_PRESENT_MODE_FIFO_KHR;   // (relink: low_cap_repeats holds frames on FIFO only)
     VkExtent2D swap_extent{};
     std::vector<VkImage> swap_images;
     std::vector<VkSemaphore> swap_rendered;   // present waits belong to acquired images, not frame slots
@@ -291,6 +292,21 @@ void vma_log_heaps();
 PFN_vkGetInstanceProcAddr instance_proc();   // vk_main.cpp
 
 bool create_swapchain(uint32_t width, uint32_t height);
+/// (relink) ReShade (and RenoDX, a ReShade add-on) in the process, or RX_VK_RESHADE=1: the presents on the graphics queue and the
+/// swapchain's images drawable, as ReShade's effects and RenoDX's HDR pass need. RX_VK_RESHADE=0: never
+bool reshade_compat();
+/// (relink) The launcher's "30, smooth" frame rate (HOS_FPS_CAP=<20-59>, host/nn_vi.c): the cap, 0 when off or unlocked
+int fps_low_cap();
+/// (relink) The refresh rate of the display the game's window is on, in Hz (60 when it cannot be read)
+int display_refresh_hz();
+/// (relink) Under fps_low_cap on a vsynced (FIFO) swapchain: how many refreshes each game frame is held for (it is presented
+/// that many times, vk_replay.cpp present_image); 1 otherwise
+int low_cap_repeats();
+/// (relink) The game frames the display has taken (host/nn_vi.c paces HOS_FPS_CAP's frames by it: option 12)
+extern std::atomic<int> presents_shown;
+/// (relink) Under fps_low_cap with frames held on the display: the rate it shows them at, in thousandths of a frame a second
+/// (100 Hz, 3 refreshes: 33333); 0 when nothing holds them (no window, no FIFO). host/nn_vi.c paces to it (option 14)
+extern std::atomic<int> low_cap_mfps;
 bool replay_start();                          // vk_replay.cpp
 bool precompile_wanted();                     // vk_draw.cpp
 void precompile_run(void (*progress)(size_t done, size_t total));

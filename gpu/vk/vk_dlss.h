@@ -74,4 +74,8 @@ int dlss_status(char* b, size_t n);
 /// scale (dlss_jitter_phases, HOS_OPT_DLSS_JITTER_PHASES), or FSR's (FFX's own count)
 uint32_t dlss_jitter_size(int axis);
 
+/// (relink) The mip bias the game's mipmapped textures are sampled with while DLSS or FSR scales the 3D up (0 otherwise):
+/// log2(render width / output width) - 1, in quarter steps (vk_draw.cpp sampler_make)
+float upscaler_lod_bias();
+
 } // namespace mkwvk

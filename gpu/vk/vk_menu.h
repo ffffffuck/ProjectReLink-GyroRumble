@@ -5,6 +5,18 @@
 
 namespace mkwvk {
 
+// (relink) Option numbers the host asks for (rx_option, host/rx_backend.c), kept here and not in vk_api.h: that file is part
+// of the shader cache's stamp, and a line added there makes every player prepare their shaders again at the update.
+// The Controls tab's Left / Right stick dead zone, in percent of the stick's travel (host/hos_stick.h)
+enum { HOS_OPT_DEADZONE_L = 10, HOS_OPT_DEADZONE_R = 11 };
+// the game frames the display has taken, modulo 2^30 (host/nn_vi.c paces HOS_FPS_CAP's frames by it)
+enum { HOS_OPT_PRESENTS_SHOWN = 12 };
+// the Graphics tab's Field of view, in percent of the game's camera angle (host/nn_vi.c, nx2/oot_fov.py)
+enum { HOS_OPT_FOV = 13 };
+// HOS_FPS_CAP's frames as the display shows them, in thousandths of a frame a second (100 Hz holding 3 refreshes: 33333);
+// 0 when the display does not hold them (host/nn_vi.c paces to it)
+enum { HOS_OPT_LOW_CAP_MFPS = 14 };
+
 // (out of the box every feature is off: what the game does on its own. The ini beside the executable keeps a player's choices)
 struct Options {
     int framegen = 0;     // made frames: 0 off, or 2, 3, 4 times the game's frames
@@ -34,7 +46,12 @@ struct Options {
     int invert_cam_x = 0; // right-stick camera horizontal inversion: 0 normal, 1 inverted
     int invert_cam_y = 0; // right-stick camera vertical inversion: 0 normal, 1 inverted
     int rumble = 100;     // the controllers' rumble in percent of the game's: 0 Off, 25 to 150 (host/pad_sdl.c)
+    int deadzone_l = 24;  // (relink) the left stick's round dead zone in percent, 0 to 50 (host/hos_stick.h); 24: XInput's
+    int deadzone_r = 24;  // (relink) the right stick's
+    int fov = 100;        // (relink) the camera's field of view in percent of the game's, 70 to 150 (host/nn_vi.c, nx2/oot_fov.py)
     int pad_layout = 0;   // 0 Nintendo (default), 1 Xbox / PC, 2 Swap Face Buttons, 3 Custom
+    int button_prompts = 0;   // (relink) the game's button prompts: 0 its own (Nintendo), 1 Xbox, 2 PlayStation; read once, at
+                              // the start (host/prompts.c; HOS_BUTTON_PROMPTS over it)
     int gyro = 1;         // motion controls from a pad's gyroscope (host/pad_sdl.c, host/hos_motion.h); on by default
     int gyro_sens_x = 100;   // the motion aim's horizontal sensitivity in percent
     int gyro_sens_y = 100;   // the motion aim's vertical sensitivity in percent
@@ -74,6 +91,10 @@ int menu_link_age();          // (relink) Link's age as the game side said it: 0
 int menu_take_capture_request();   // (relink, vk_replay.cpp: a place whose picture the Travel page wants now, -1 none)
 void menu_store_capture(int place, const uint8_t* rgba, uint32_t w, uint32_t h);   // (that picture, RGBA: to the picture worker)
 bool menu_teleport_captures_on();   // (relink: whether the Travel page's pictures are taken: the game side watches only then)
+bool menu_take_screenshot_request();   // (relink, vk_replay.cpp: F12 was pressed since the last picture taken)
+/// (relink) F12's picture (RGBA, the game's picture as presented): a worker writes it as a PNG in the game folder's
+/// screenshots folder and says so over the game (vk_screenshot.h)
+void menu_store_screenshot(std::vector<uint8_t>&& rgba, uint32_t w, uint32_t h);
 void menu_note_frame(bool game_frame);   // (the frame rates the FPS counter shows)
 /// The game's picture's size (the Output resolution, its crop) and the window's, at each present: the Window scaling filter
 /// row says when it is not needed
