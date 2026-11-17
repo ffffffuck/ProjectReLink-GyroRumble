@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     steps:
@@ -84,8 +85,30 @@ jobs:
             exit 1
           fi
 
-          echo "Waiting for the Windows package and Vulkan checks on PR #$number." >> "$GITHUB_STEP_SUMMARY"
-          gh pr checks "$number" --watch --fail-fast
+          sync_sha=$(git rev-parse HEAD)
+          echo "Dispatching Windows and Vulkan checks for $sync_sha." >> "$GITHUB_STEP_SUMMARY"
+          gh workflow run windows.yml --ref automation/upstream-sync
+
+          run_id=""
+          for attempt in $(seq 1 30); do
+            run_id=$(gh run list --workflow windows.yml --branch automation/upstream-sync --event workflow_dispatch \
+              --limit 10 --json databaseId,headSha \
+              --jq ".[] | select(.headSha == \"$sync_sha\") | .databaseId" | head -n 1)
+            if [[ -n "$run_id" ]]; then break; fi
+            sleep 2
+          done
+          if [[ -z "$run_id" ]]; then
+            echo "::error::Windows workflow dispatch did not create a run for $sync_sha."
+            exit 1
+          fi
+
+          echo "Waiting for Windows run $run_id on PR #$number." >> "$GITHUB_STEP_SUMMARY"
+          gh run watch "$run_id" --exit-status
+          pr_head=$(gh pr view "$number" --json headRefOid --jq '.headRefOid')
+          if [[ "$pr_head" != "$sync_sha" ]]; then
+            echo "::error::PR #$number changed during validation; refusing to merge an untested commit."
+            exit 1
+          fi
 
           state=$(gh pr view "$number" --json state --jq '.state')
           if [[ "$state" == OPEN ]]; then
