@@ -11,7 +11,7 @@ changes to their code were made in November 2026.
     Longshot: Copyright (C) 2026 the Longshot contributors
 
 Through them it also includes code from other projects under the GPL (Eden, suyu, TOTKPort's renderer) and parts under
-licenses that work with the GPL (Sirit, the Vulkan Memory Allocator, SDL, Opus, stb, zbic, the a64-kit tools, and AMD FidelityFX's FSR library shipped with its license); each
+licenses that work with the GPL (Sirit, the Vulkan Memory Allocator, SDL, Opus, stb (stb_dxt among them), ARM's ASTC Encoder (Apache-2.0), zbic, the a64-kit tools, and AMD FidelityFX's FSR library shipped with its license); each
 keeps its copyright notices and license in its files and folders.
 
 The Travel page's list of places (`gpu/vk/oot_tp_places.h`) follows the destination list of the Fast Travel mod

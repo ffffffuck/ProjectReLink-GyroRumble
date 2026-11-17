@@ -1395,6 +1395,18 @@ def make(romfs, out):
             os.remove(path)
         print(f"button prompts: the HUD cross's letters not made ({type(e).__name__ + ': ' if not isinstance(e, Unfit) else ''}"
               f"{e}): they stay the Switch's", file=sys.stderr)
+    # (relink: the ocarina's note buttons, nx2/ocarina_prompts.py; without them the notes keep the Switch's letters)
+    path = os.path.join(out, "ocarina.bin")
+    try:
+        import ocarina_prompts
+        path = ocarina_prompts.make(romfs, out, dictionary=dictionary)
+        print(f"button prompts: the ocarina's note buttons ({len(ocarina_prompts.BUTTONS)} x {len(FAMILIES)} families x "
+              f"{len(POSITIONS)} positions) in {path}", file=sys.stderr)
+    except Exception as e:
+        if os.path.exists(path):
+            os.remove(path)
+        print(f"button prompts: the ocarina's note buttons not made ({type(e).__name__}: {e}): they stay the Switch's",
+              file=sys.stderr)
 
 
 def main(argv=None):

@@ -122,8 +122,8 @@ int hos_cores(void) {
 }
 int hos_thread_core(HosThread *t) {
     if (!t) return 0;
-    if (t->vc_held) return t->vc_held - 1;   /* (virtual cores: the one it holds) */
     const int n = hos_cores();
+    if (t->vc_held && t->vc_held <= n) return t->vc_held - 1;   /* (virtual cores 0..n-1; overflow slots keep nominal core) */
     if (t->ideal_core >= 0) return t->ideal_core % n;
     /* the mask's lowest core, wrapped (a thread pinned past the cores there are shares a core number: the extra
        BaseProc executors, totk_cores.c) */
@@ -720,7 +720,32 @@ static void sleep_ns(int64_t ns) {
         pauses = e ? atoi(e) : 0;
         pauses = pauses < 0 ? 0 : pauses > 4096 ? 4096 : pauses;
     }
+    /* (linux) SwitchToThread() is sched_yield() == 0, which is always TRUE even when no other thread is runnable, so the
+       !SwitchToThread() pause backoff below never runs on Linux and 20 us sleeps (~350/frame) spin in SYS_sched_yield.
+       HOS_SHORT_SLEEP_PAUSE=<n> (default 0 = off; e.g. 32): yield once, then run n PAUSEs per clock check (or < 0: nanosleep). */
+    static int short_sleep_pause = -999999;
+    if (__atomic_load_n(&short_sleep_pause, __ATOMIC_RELAXED) == -999999) {
+        const char *e = getenv("HOS_SHORT_SLEEP_PAUSE");
+        int v = e ? atoi(e) : 0;
+        if (v > 4096) v = 4096;
+        __atomic_store_n(&short_sleep_pause, v, __ATOMIC_RELAXED);
+    }
     if (ns < 1000000 && !short_timer) {
+        const int sp = __atomic_load_n(&short_sleep_pause, __ATOMIC_RELAXED);
+        if (sp > 0) {
+            SwitchToThread();
+            while (hos_now_ns() < until) {
+                for (int i = 0; i < sp; i++) YieldProcessor();
+            }
+            return;
+        }
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+        if (sp < 0) {
+            struct timespec ts = {0, (long)ns};
+            nanosleep(&ts, NULL);
+            return;
+        }
+#endif
         while (hos_now_ns() < until)
             if (!SwitchToThread()) {
                 YieldProcessor();
@@ -1138,11 +1163,32 @@ int hos_vcores_on(void) {
     }
     return on;
 }
-static int vc_cores(void) { return hos_cores() > 8 ? 8 : hos_cores(); }
+static int vc_base_cores(void) { return hos_cores() > 8 ? 8 : hos_cores(); }
+static int vc_overflow_cores(void) {
+    static int ov = -1;
+    if (ov < 0) {
+        const char *e = getenv("HOS_VCORE_OVERFLOW");
+        const int want = e ? atoi(e) : 0;
+        const int room = 8 - vc_base_cores();
+        ov = want < 0 ? 0 : want > room ? room : want;
+        if (ov > 0)
+            hos_log("vcores: %d overflow virtual core(s) enabled for priority<=16 frame threads (total %d; background capped to %d)",
+                    ov, vc_base_cores() + ov, vc_base_cores());
+    }
+    return ov;
+}
+static int vc_cores(void) { return vc_base_cores() + vc_overflow_cores(); }
 static unsigned vc_allowed(HosThread *t) {
-    const unsigned all = (1u << vc_cores()) - 1;
-    unsigned m = (unsigned)(t->core_mask & all);
+    const int base = vc_base_cores();
+    const unsigned base_all = (1u << base) - 1;
+    unsigned m = (unsigned)(t->core_mask & base_all);
     if (!m) m = 1u << hos_thread_core(t);
+    /* Overflow slots [base .. vc_cores()-1]: ONLY priority<=16 frame threads (Main, BaseProcExecutor0..5, ModuleSystemWorker1..5).
+       TICK-062 proved none of them call GetCurrentCoreNumber after startup, while background/streaming threads (priority>16)
+       stay strictly confined to [0..base-1] so transitions cannot over-schedule decompression or GTT. */
+    const int ov = vc_overflow_cores();
+    if (ov > 0 && t->priority <= 16)
+        m |= ((1u << ov) - 1u) << base;
     return m;
 }
 /* a runs before b */
@@ -1204,7 +1250,7 @@ static int vc_capped(const HosThread *t) {
 static int vc_free_for(HosThread *t) {
     const unsigned m = vc_allowed(t);
     if (vc_capped(t)) return -1;
-    if (t->vc_last > 0 && (m >> (t->vc_last - 1) & 1) && !vc_owner[t->vc_last - 1]) return t->vc_last - 1;
+    if (t->vc_last > 0 && t->vc_last <= vc_base_cores() && (m >> (t->vc_last - 1) & 1) && !vc_owner[t->vc_last - 1]) return t->vc_last - 1;
     const int ideal = hos_thread_core(t);
     if ((m >> ideal & 1) && !vc_owner[ideal]) return ideal;
     for (int c = 0; c < vc_cores(); c++)

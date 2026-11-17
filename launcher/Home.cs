@@ -140,6 +140,28 @@ public partial class MainWindow
                 },
             },
         });
+        // (the prepared shaders deleted, prepared again at the next start: objects drawn white or wrong after a start that
+        // crashed while it prepared them)
+        var reprepare = new Button { Style = St("Link"), Content = L("Préparer de nouveau…", "Prepare again…"), HorizontalAlignment = HorizontalAlignment.Left };
+        reprepare.Click += PrepareShadersAgain;
+        RowsGame.Children.Add(new Border
+        {
+            Style = St("Row"),
+            Child = new StackPanel
+            {
+                Children =
+                {
+                    new TextBlock { Text = L("Shaders", "Shaders"), Style = St("RowLabel") },
+                    new TextBlock
+                    {
+                        Text = L("Préparés une fois pour votre carte graphique. Si des objets s'affichent mal (tout blancs, par exemple), préparez-les de nouveau : le prochain lancement prend 10 à 15 minutes de plus. Vos sauvegardes ne sont pas touchées.",
+                                 "Prepared once for your graphics card. If objects look wrong (all white, for example), prepare them again: the next start takes 10 to 15 minutes longer. Your saves are not touched."),
+                        Style = St("RowHint"),
+                    },
+                    new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0), Children = { reprepare } },
+                },
+            },
+        });
 
         // ---- controls
         RowsControls.Children.Add(new TextBlock

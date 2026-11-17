@@ -81,24 +81,40 @@ static void monitor_init(pthread_mutex_t *mu, pthread_cond_t *cv) {
 static long futex(volatile uint32_t *a, int op, uint32_t v, const struct timespec *ts) {
     return syscall(SYS_futex, a, op, v, ts, NULL, 0);
 }
+/* HOS_FAST_FUTEX_CV=1: track sleeping futex waiters in cv->waiters (separate 32-bit word from cv->seq, 8-byte
+   Win64-sized CONDITION_VARIABLE) and skip SYS_futex(FUTEX_WAKE_PRIVATE) when no thread is sleeping on cv. */
+static int fast_futex_cv_on(void) {
+    static int on = -1;
+    const int v = __atomic_load_n(&on, __ATOMIC_RELAXED);
+    if (v >= 0) return v;
+    const char *e = getenv("HOS_FAST_FUTEX_CV");
+    const int init = (e && e[0] && strcmp(e, "0") != 0) ? 1 : 0;
+    __atomic_store_n(&on, init, __ATOMIC_RELAXED);
+    return init;
+}
 static struct timespec rel_ms(DWORD ms) {
     struct timespec ts = {(time_t)(ms / 1000), (long)(ms % 1000) * 1000000L};
     return ts;
 }
 void WakeConditionVariable(CONDITION_VARIABLE *cv) {
-    __atomic_add_fetch(&cv->seq, 1, __ATOMIC_SEQ_CST);
-    futex(&cv->seq, FUTEX_WAKE_PRIVATE, 1, NULL);
+    __atomic_add_fetch(&cv->seq, 1u, __ATOMIC_SEQ_CST);
+    if (!fast_futex_cv_on() || __atomic_load_n(&cv->waiters, __ATOMIC_SEQ_CST) != 0)
+        futex(&cv->seq, FUTEX_WAKE_PRIVATE, 1, NULL);
 }
 void WakeAllConditionVariable(CONDITION_VARIABLE *cv) {
-    __atomic_add_fetch(&cv->seq, 1, __ATOMIC_SEQ_CST);
-    futex(&cv->seq, FUTEX_WAKE_PRIVATE, INT_MAX, NULL);
+    __atomic_add_fetch(&cv->seq, 1u, __ATOMIC_SEQ_CST);
+    if (!fast_futex_cv_on() || __atomic_load_n(&cv->waiters, __ATOMIC_SEQ_CST) != 0)
+        futex(&cv->seq, FUTEX_WAKE_PRIVATE, INT_MAX, NULL);
 }
 static BOOL cv_wait(CONDITION_VARIABLE *cv, DWORD ms, void (*unlock)(void *), void (*relock)(void *, ULONG), void *l, ULONG flags) {
+    const int fast = fast_futex_cv_on();
+    if (fast) __atomic_add_fetch(&cv->waiters, 1u, __ATOMIC_SEQ_CST);
     const uint32_t seq = __atomic_load_n(&cv->seq, __ATOMIC_SEQ_CST);
     unlock(l);
     struct timespec ts = rel_ms(ms);
     const long r = futex(&cv->seq, FUTEX_WAIT_PRIVATE, seq, ms == INFINITE ? NULL : &ts);
     const int timed_out = r == -1 && errno == ETIMEDOUT;
+    if (fast) __atomic_sub_fetch(&cv->waiters, 1u, __ATOMIC_SEQ_CST);
     relock(l, flags);
     if (timed_out) { last_error = ERROR_TIMEOUT; return FALSE; }
     return TRUE;
