@@ -47,9 +47,10 @@ The first start is long, once (about 16 minutes on our PC): the game prepares it
 for your driver's cache and makes the compute pipelines play is known to use, with a progress screen. It does that part
 again after a graphics driver update, so that the first visit of a place does not stutter while the driver compiles, and
 after an update of ReLink that changes the renderer's shader code or state (0.6.3 is one). Since 0.7.6 every PC starts the
-same way, whatever its RAM. A PC that ran an earlier version with 20 GB of RAM or more has a pipeline cache file in the game
-folder, `mkw_vk_pipelines.bin` (800 MB and more), that nothing reads any more: since 0.7.8 the game deletes it at its first
-start, unless `RX_VK_LEAN_PIPELINES=0` in `relink_env.txt` brings back the older start, which uses it.
+same way, whatever its RAM. Lean starts keep graphics pipelines built during play, and prewarmed compute pipelines, in
+`relink_vk_pipelines.bin` beside the game; the next run can reuse them. The older full-start cache, `mkw_vk_pipelines.bin`
+(800 MB and more on some PCs), is still discarded in lean mode. `RX_VK_LEAN_PIPELINES=0` in `relink_env.txt` brings back the
+older full start and its cache.
 
 ![Installing](docs/install.png)
 
@@ -384,9 +385,10 @@ Le premier démarrage est long, une seule fois (environ 16 minutes sur notre PC)
 pipelines graphiques pour le cache du pilote et fabrique les pipelines de calcul dont on sait que le jeu se sert, avec un
 écran de progression. Il le refait après une mise à jour du pilote graphique, et après une mise à jour de ReLink qui change
 le code des shaders du moteur de rendu. Depuis la 0.7.6, tous les PC démarrent de la même façon, quelle que soit leur RAM.
-Un PC qui a fait tourner une version plus ancienne avec 20 Go de RAM ou plus garde dans le dossier du jeu un fichier de cache
-de pipelines, `mkw_vk_pipelines.bin` (800 Mo et plus), que plus rien ne lit : depuis la 0.7.8, le jeu le supprime à son
-premier démarrage, sauf si `RX_VK_LEAN_PIPELINES=0` dans `relink_env.txt` remet l'ancien démarrage, qui s'en sert.
+Le démarrage léger garde dans `relink_vk_pipelines.bin`, à côté du jeu, les pipelines graphiques construits pendant la partie
+et les pipelines de calcul préparés ; le lancement suivant peut les réutiliser. L'ancien cache du démarrage complet,
+`mkw_vk_pipelines.bin` (800 Mo et plus sur certains PC), est toujours supprimé en mode léger.
+`RX_VK_LEAN_PIPELINES=0` dans `relink_env.txt` réactive l'ancien démarrage complet et son cache.
 
 Le lanceur dit quand une nouvelle version est sortie ; **Update** ne télécharge que ce qui a changé et reconstruit le jeu sur
 place. Les sauvegardes, les réglages et les mods sont conservés.

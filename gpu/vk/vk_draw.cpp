@@ -6,7 +6,8 @@
 // and the draws themselves.
 //
 // Pipelines persist in the driver's own disk cache. The full start (RX_VK_LEAN_PIPELINES=0) also keeps a VkPipelineCache
-// next to the executable (mkw_vk_pipelines.bin); the lean start, every PC's since 0.7.6, keeps none (pipelines_lean, below).
+// next to the executable (mkw_vk_pipelines.bin); the lean start keeps a separate cache of graphics pipelines made in play and
+// compute pipelines it prewarms (relink_vk_pipelines.bin), without prebuilding every noted graphics pipeline before play.
 #include <algorithm>
 #include <filesystem>
 #include <iterator>
@@ -759,7 +760,7 @@ bool pipelines_lean() {
         if (const char* e = getenv("RX_VK_LEAN_PIPELINES")) on = atoi(e) != 0;
         else if (getenv("RX_VK_PRECOMPILE")) on = false;
         if (on)
-            logf("vk: lean pipelines: no pipeline cache kept in memory, graphics pipelines made at their first draw, the compute "
+            logf("vk: lean pipelines: graphics pipelines made at their first draw are kept in this PC's disk cache; the compute "
                  "pipelines play has used (this PC's list and the shipped one) before the game (RX_VK_LEAN_PIPELINES=0: all of "
                  "them before the game, as PCs with 20 GB "
                  "of RAM and more had until 0.7.5)");
@@ -849,12 +850,15 @@ std::vector<uint8_t> pcache_read(const std::string& path) {
     return data;
 }
 void pcache_init() {
-    if (pcache || pipelines_lean()) return;   // (lean: no cache of ours, VK_NULL_HANDLE to every pipeline made)
+    if (pcache) return;
     char exe[MAX_PATH];
     const DWORD n = game_module_path(exe, MAX_PATH);
     std::string dir(exe, n);
     dir = dir.substr(0, dir.find_last_of("\\/") + 1);
-    pcache_path = dir + "mkw_vk_pipelines.bin";
+    // Lean starts keep runtime graphics pipelines and prewarmed compute pipelines separate from the full start's large cache
+    // of every noted pipeline. The old full cache is still dropped by old_pipeline_cache_drop; this cache survives restarts of
+    // the same game version and GPU driver.
+    pcache_path = dir + (pipelines_lean() ? "relink_vk_pipelines.bin" : "mkw_vk_pipelines.bin");
     // (relink, RX_VK_PIPELINE_CACHE_PATH=<file>: another pipeline cache, for cold-start tests that must not touch the player's)
     if (const char* e = getenv("RX_VK_PIPELINE_CACHE_PATH")) pcache_path = e;
     const std::vector<uint8_t> data = pcache_read(pcache_path);
@@ -8052,13 +8056,10 @@ size_t warm_run(void (*progress)(size_t done, size_t total), size_t after) {
     return notes.size();
 }
 
-// (relink, 0.7.8) The full start's pipeline cache files, mkw_vk_pipelines.bin and its .new (800 MB and more on the PCs that
-// had the full start until 0.7.5), are read by nothing in a lean start (pcache_init returns before) and written by nothing
-// either: a lean start removes them, said once in the log. Only the files beside the game, never RX_VK_PIPELINE_CACHE_PATH's,
-// and never in the full start (RX_VK_LEAN_PIPELINES=0, RX_VK_PRECOMPILE), which is the one that reads them. A player who
-// turns the full start on later loses nothing but time: pcache_init starts from an empty cache, as on a new install, that
-// start builds every noted pipeline from the driver's own cache (or compiles it), and the file is written again.
-// RX_VK_KEEP_OLD_PIPELINE_CACHE=1: kept (a test folder that goes from one start to the other)
+// (relink, 0.7.9) A lean start has its own cache of graphics pipelines built in play and compute pipelines prewarmed,
+// relink_vk_pipelines.bin. It is saved during play and read on the next start, but never prebuilds every noted graphics
+// pipeline. The old full-start cache (mkw_vk_pipelines.bin and .new, 800 MB and more on PCs that used the full start until
+// 0.7.5) is still discarded in lean mode; it is not the lean cache. RX_VK_KEEP_OLD_PIPELINE_CACHE=1: keep that legacy cache.
 void old_pipeline_cache_drop() {
     if (getenv("RX_VK_KEEP_OLD_PIPELINE_CACHE")) return;
     char exe[MAX_PATH];
