@@ -78,7 +78,7 @@ static class Scene
         }
 
         // the sun by day, the moon by night, over the right of the left column: as high as the hour puts it
-        const double x = 420;
+        const double x = 790;   // (relink: over the right of the picture, clear of the staff)
         if (sunUp)
         {
             var up = Math.Sin(Math.PI * (hour - 5.5) / 14);
@@ -96,10 +96,22 @@ static class Scene
             Disc(canvas, x + 7.5, y - 4, 15, top, 1);   // (the sky's own colour over it: a crescent)
         }
 
-        // three ridges, the far one taking the horizon's light
+        // (relink) the land's marks, in the sky's own light: the mountain with its ring of smoke, behind the far ridge
+        Hill(canvas, "M498,232 L583,126 L597,135 L611,118 L706,232 Z", Mix(low, C("3C3550"), 0.72));
+        var ring = new Ellipse { Width = 54, Height = 13, Stroke = new SolidColorBrush(Mix(low, C("ECE6D8"), 0.75)), StrokeThickness = 3, Opacity = 0.6 };
+        Canvas.SetLeft(ring, 577);
+        Canvas.SetTop(ring, 98);
+        canvas.Children.Add(ring);
+
+        // three ridges, the far one taking the horizon's light; the castle on the middle one, a lone tree on the near one
         Hill(canvas, "M0,226 C120,194 230,200 330,216 C430,232 520,208 640,200 C780,190 900,226 1120,204 L1120,700 L0,700 Z", Mix(low, C("1E3B30"), 0.58));
+        var castle = Mix(low, C("152B22"), 0.86);
+        Hill(canvas, "M716,232 L716,194 L722,194 L722,186 L728,186 L728,194 L734,194 L734,176 L740,164 L746,176 L746,194 L754,194 L754,202 L762,202 L762,186 L768,186 L768,232 Z", castle);
         Hill(canvas, "M0,262 C90,246 190,234 300,250 C400,264 470,274 600,262 C760,246 900,272 1120,246 L1120,700 L0,700 Z", Mix(low, C("183226"), 0.82));
-        Hill(canvas, "M0,292 C140,274 260,284 380,298 C520,314 700,288 860,294 C980,298 1060,288 1120,284 L1120,700 L0,700 Z", Mix(top, C("11241B"), 0.92));
+        var near = Mix(top, C("11241B"), 0.92);
+        Hill(canvas, "M0,292 C140,274 260,284 380,298 C520,314 700,288 860,294 C980,298 1060,288 1120,284 L1120,700 L0,700 Z", near);
+        Disc(canvas, 612, 278, 17, near, 1);
+        Hill(canvas, "M609,284 L615,284 L615,304 L609,304 Z", near);
     }
 
     static void Disc(Canvas canvas, double x, double y, double r, Color colour, double opacity)

@@ -82,7 +82,8 @@ frames a second or unlocked, frame generation), the game's language and the cont
 you play, so that every frame lasts the same time on a 100 or 144 Hz display, and puts the display's own rate back
 afterwards. In the game, **Insert** or **F1** opens the same menu, **F11** switches full screen, and **F12** saves a
 screenshot: the game's picture at its output resolution, without the menu or the FPS counter, as a PNG in the game folder's
-`screenshots` folder (a line over the game says where).
+`screenshots` folder (a line over the game says where). These three keys can be changed in the menu's Gameplay tab
+(**Menu key**, **Screenshot key**, **Fullscreen key**: F1 to F12, Insert, Pause or Scroll Lock).
 
 **Upscaler** (since 0.7): what scales the 3D up to the screen. The game's own network by default; **AMD FSR 3.1** on any
 graphics card (AMD's library comes with ReLink); or **NVIDIA DLSS / DLAA** on an RTX card, after turning on **NVIDIA DLSS** on
@@ -130,7 +131,13 @@ and makes the swapchain's images drawable, which ReShade's effects and RenoDX's 
 `0` turns it off). A RenoDX mod for this game still has to be written for its shaders: ReLink only removes what stopped
 ReShade from drawing.
 
-**Travel** (on the Cheats page: `HOS_OOT_CHEATS=1` in `relink_env.txt` shows the Gameplay tab's **Cheats** row, and
+**HDR** (Insert menu, Graphics, applies after a restart): the game draws its own HDR picture, as it does on an HDR TV,
+and ReLink shows it in HDR10. It needs Windows' HDR on for that display (Settings, System, Display, Use HDR); otherwise the
+picture stays SDR. The game is told the display's peak brightness as Windows reports it; the interface and menus are at the
+paper white, 203 nits by default (`hdr_paper_white=<80 to 500>` in `relink_options.ini`). Leave this row off when a RenoDX
+mod does the HDR.
+
+**Travel** (on the Cheats page: the Gameplay tab's **Cheats** row, shown unless `HOS_OOT_CHEATS=0` in `relink_env.txt` hides it, and
 Travel is that page's last row): a page of 190 places to go to, villages, dungeons' entrances, shops, warp points and story spots,
 grouped by area, for Link's age (Tab or X shows the other age's: going there makes Link that age). Once you have opened the
 page, each place gets a picture taken from your own game the first time Link stays there a few seconds with the menu closed
@@ -359,8 +366,14 @@ images elles aussi, `prompts\ocarina.bin`) ; la police n'a qu'une couleur.
 **Depuis la 0.7.9** : **30, smooth** (lanceur, onglet Smoothness, Frames per second) garde chaque image à l'écran le même
 temps sur les PC qui ne tiennent pas 60 ; **Field of view** (menu Insert, Graphics, 70 à 150 %) règle l'angle de la caméra et
 **Left / Right stick dead zone** (Controls, 0 à 50 %) la zone morte des sticks ; **F12** enregistre l'image du jeu en PNG
-dans le dossier `screenshots` du jeu ; les patchs de code des mods (`mods\<nom>\exefs\`, formats IPS et pchtxt) sont
+dans le dossier `screenshots` du jeu (touches du menu, de la capture et du plein écran modifiables dans l'onglet Gameplay
+depuis la 0.7.9.1) ; les patchs de code des mods (`mods\<nom>\exefs\`, formats IPS et pchtxt) sont
 appliqués quand le lanceur reconstruit le jeu (**Build again**).
+
+**Depuis la 0.7.9.1** : **HDR** (menu Insert, Graphics, après un redémarrage) affiche en HDR10 l'image HDR que le jeu dessine
+lui-même, comme sur une TV HDR ; il faut le HDR de Windows activé pour cet écran (sinon l'image reste SDR). Le blanc de
+l'interface est à 203 nits par défaut (`hdr_paper_white` dans `relink_options.ini`). Laissez-le éteint si un mod RenoDX fait
+le HDR.
 
 Il faut Windows 10 ou 11 en 64 bits, un processeur avec AVX2, une carte graphique avec Vulkan 1.3 et les mesh shaders
 (GeForce RTX 20 ou plus récente, Radeon RX 6000 ou plus récente, Intel Arc ; nous n'avons testé que sur NVIDIA), 16 Go de RAM

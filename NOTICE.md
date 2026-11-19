@@ -39,5 +39,10 @@ The Travel page's list of places (`gpu/vk/oot_tp_places.h`) follows the destinat
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 
+The menu's, the launcher's and the loading screen's typeface is Rubik (`assets/fonts`), embedded in the game and the
+launcher and used under the SIL Open Font License, Version 1.1, whose full text is in `assets/fonts/OFL-Rubik.txt`:
+
+    Copyright 2015 The Rubik Project Authors (https://github.com/googlefonts/rubik)
+
 Project ReLink is an unofficial fan project, not affiliated with or endorsed by Nintendo. The Legend of Zelda and Ocarina
 of Time are trademarks of Nintendo.

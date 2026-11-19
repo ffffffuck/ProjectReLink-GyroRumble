@@ -99,7 +99,21 @@ def _emit_run(es):
 
 
 def _available_gb():
-    """MemAvailable from /proc/meminfo in GB (None where there is none)"""
+    """MemAvailable from /proc/meminfo in GB, Windows' available physical memory there (None where there is neither)"""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class MS(ctypes.Structure):
+                _fields_ = [("len", ctypes.c_uint32), ("load", ctypes.c_uint32)] + \
+                           [(f, ctypes.c_uint64) for f in ("total", "avail", "pt", "pa", "vt", "va", "ve")]
+            m = MS()
+            m.len = ctypes.sizeof(m)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+                return m.avail / (1 << 30)
+        except (OSError, AttributeError, ValueError):
+            pass
+        return None
     try:
         with open("/proc/meminfo", encoding="ascii") as f:
             for line in f:
@@ -115,10 +129,18 @@ def emit_jobs():
     texts and the pages of the lift it touches), and at most one per 2 GB of available memory: a Steam Deck (16 GB) ran
     out with 8, and the system's out-of-memory handling stopped the lift ("lift.py stopped (signal 15): BrokenPipeError")
     or one worker (the update then sat at "jump tables" for good). 1 where there is no fork"""
-    if "fork" not in multiprocessing.get_all_start_methods():
-        return 1
     if os.environ.get("RELINK_LIFT_JOBS"):
         return max(1, int(os.environ["RELINK_LIFT_JOBS"]))
+    if "fork" not in multiprocessing.get_all_start_methods():
+        # (relink, 17/11) Windows: processes started anew (spawn_emit), each given its share of the functions: one per
+        # 1.5 GB of available memory beyond 2 GB, 12 at most. A64_SPAWN_EMIT=0: one process, as before
+        if not spawn_ok():
+            return 1
+        n = max(1, min(12, (os.cpu_count() or 1)))
+        gb = _available_gb()
+        if gb is not None:
+            n = max(1, min(n, int((gb - 2) // 1.5)))
+        return n
     try:
         n = len(os.sched_getaffinity(0))
     except AttributeError:
@@ -130,11 +152,107 @@ def emit_jobs():
     return n
 
 
+def spawn_ok():
+    """(relink) Windows, where no process can be forked: the emit spread over processes started anew (spawn_emit)"""
+    return os.name == "nt" and os.environ.get("A64_SPAWN_EMIT", "1") not in ("", "0")
+
+
+# ---- (relink, 17/11) The emit on Windows, in processes started anew. On Linux the workers are forked and see the lifter as it
+# is; here nothing can be forked, and the lift ran on one core: 294523 functions, two to three minutes of a five-minute lift
+# (a mod's code patch or an update lifts again). Each worker gets, once, the lifter without its functions' bodies and its
+# image (every other attribute is small: the entries, the PLT, the jump tables, the names, the sites' C), then runs of
+# functions with their bodies; it makes the instruction texts of its runs itself (the same per word, a64_lift.instruction_texts)
+# and sends back each function's text and calls, the counters' additions and the FPX shapes it met. The output is the one-
+# process output, byte for byte (checked against a one-process lift of the whole game, 17/11).
+_spawn_lifter = None
+_SPAWN_SKIP = ("funcs", "img", "emit_function", "texts_lazy", "fpx_extra")
+
+
+def _spawn_init(state, polls):
+    global _spawn_lifter
+    if polls:
+        import poll
+        poll.install()
+    L = object.__new__(a64_lift.Lifter)
+    L.__dict__.update(state)
+    L.funcs = {}
+    _spawn_lifter = L
+
+
+def _spawn_run(items, polls):
+    L = _spawn_lifter
+    L.funcs = dict(items)
+    counters = [L.stats, L.unhandled, L.ijump]
+    if polls:
+        import poll
+        counters.append(poll.stats)
+    before = _counts(counters)
+    fpx = set()
+    texts = a64_lift.instruction_texts(L.funcs, fpx)
+    out = [(e,) + tuple(L.emit_function(e, texts)) for e, _ in items]
+    deltas = [collections.Counter({k: v - b.get(k, 0) for k, v in c.items() if v != b.get(k, 0)})
+              for b, c in zip(before, counters)]
+    L.funcs = {}
+    return out, deltas, fpx
+
+
+def spawn_emit(L, order, counters, jobs, run):
+    """(e, text, refs) for every function of order, in order, from `jobs` processes started anew. Raises before yielding
+    anything if the workers cannot be started (the caller then emits here)"""
+    from concurrent.futures import ProcessPoolExecutor
+    polls = len(counters) > 3
+    state = {k: v for k, v in L.__dict__.items() if k not in _SPAWN_SKIP}
+    for k in ("stats", "unhandled", "ijump"):
+        state[k] = type(getattr(L, k))()
+    runs = [order[i:i + run] for i in range(0, len(order), run)]
+    ctx = multiprocessing.get_context("spawn")
+    fpx_all = set()
+    L.fpx_extra = fpx_all   # (filled as the runs come back: the generator is closed after its last function, not run to its end)
+    with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx, initializer=_spawn_init, initargs=(state, polls)) as pool:
+        pending = {}
+        nxt = 0
+
+        def feed():
+            nonlocal nxt
+            while nxt < len(runs) and len(pending) < 2 * jobs:   # (a few runs ahead: their bodies are not all copied at once)
+                es = runs[nxt]
+                pending[nxt] = pool.submit(_spawn_run, [(e, L.funcs[e]) for e in es], polls)
+                nxt += 1
+        feed()
+        for i in range(len(runs)):
+            out, deltas, fpx = pending.pop(i).result()
+            feed()
+            for c, d in zip(counters, deltas):
+                for k, v in d.items():
+                    c[k] = c.get(k, 0) + v
+            fpx_all |= fpx
+            yield from out
+
+
 def parallel_emit(emit, order, texts, counters, jobs, run=2000):
     """(e, text, refs) for every function of order, in order, emitted by `jobs` forked processes. A worker that dies
     (stopped for memory) ends the pool with an error instead of a wait forever (multiprocessing.Pool's imap never
     returns then); the runs not done yet are emitted here, one process."""
     global _job
+    L = getattr(emit, "__self__", None)
+    if jobs > 1 and len(order) >= 2 * run and "fork" not in multiprocessing.get_all_start_methods() and L is not None:
+        done = 0
+        try:
+            for got in spawn_emit(L, order, counters, jobs, run):
+                yield got
+                done += 1
+            return
+        except Exception as ex:   # (a worker that could not start or stopped: the rest here, one process)
+            print("emit: the worker processes stopped (%s: %s): the last %d of %d functions are emitted in this process"
+                  % (type(ex).__name__, ex, len(order) - done, len(order)), flush=True)
+            if texts is None:
+                texts = a64_lift.instruction_texts(L.funcs, L.__dict__.setdefault("fpx_extra", set()))
+                L.fpx_extra = L.fpx_extra
+            for e in order[done:]:
+                yield (e,) + tuple(emit(e, texts))
+            return
+    if texts is None and L is not None:   # (texts_lazy, with too few functions for the workers)
+        texts = a64_lift.instruction_texts(L.funcs, L.__dict__.setdefault("fpx_extra", set()))
     if jobs <= 1 or len(order) < 2 * run:
         for e in order:
             yield (e,) + tuple(emit(e, texts))
@@ -176,6 +294,10 @@ def write(L, gen_dir, img_dir, rechunk=False, counters=(), jobs=None):
     b = Boundaries(a64_lift.CHUNK_BYTES, starts, L.funcs)
     base_emit = L.emit_function
     jobs = emit_jobs() if jobs is None else jobs
+    # (relink: on Windows the workers make their own instruction texts: none made here, unless they cannot start)
+    L.texts_lazy = jobs > 1 and "fork" not in multiprocessing.get_all_start_methods()
+    if L.texts_lazy:
+        print("emit: %d processes" % jobs, flush=True)
     made = None
 
     def emit_function(e, texts):
@@ -249,12 +371,19 @@ def write_costs(gen_dir, costs):
         f.write("".join("%s %d\n" % kv for kv in sorted(known.items())))
 
 
+# (relink, 17/11) What one compiled file holds: about 8 MB of cost, not a whole 24 MB chunk. A compiler's peak memory follows its
+# file's size (~59 MB per MB of C: one 24 MB chunk 1411 MB, the same chunk in three parts 434 to 527 MB each) and the CPU time does
+# not (46 s whole, 47 s in three parts, objects within 0.3 % of each other's size): a 16 GB PC ran 4 to 5 compilers at once on 12
+# threads, the memory as the limit. The hot pieces (nx2/split_hot.py) are not cut: their callees inline within them
+PART_BYTES = 8 << 20
+
+
 def split_big(gen_dir, files, budget=None):
-    """Chunks whose estimated compile time (fn_cost) is well past a plain chunk's, cut at function starts into parts of about equal
-    cost: code_NNN.c, code_NNN_1.c ... A chunk of the giant functions took 350 s, alone at the end of the build, where a chunk of
-    ordinary functions takes 45; the boundaries kept in chunks.txt also let chunks grow (44 MB beside 25). The first part keeps the
+    """Chunks whose estimated compile time (fn_cost) is well past a part's (PART_BYTES), cut at function starts into parts of about
+    equal cost: code_NNN.c, code_NNN_1.c ... A chunk of the giant functions took 350 s, alone at the end of the build, where a chunk
+    of ordinary functions takes 45; the boundaries kept in chunks.txt also let chunks grow (44 MB beside 25). The first part keeps the
     name, so seed_from_gen and the boundaries are as before. Writes chunk_costs.txt for every chunk; returns the new parts' paths"""
-    budget = budget or a64_lift.CHUNK_BYTES
+    budget = budget or PART_BYTES
     made, costs = [], {}
     for path in files:
         m = re.fullmatch(r"code_(\d{3})\.c", os.path.basename(path))

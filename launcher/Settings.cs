@@ -38,8 +38,10 @@ static class Game
     public static bool KeepsGameFiles(string folder) =>
         Directory.Exists(Path.Combine(folder, ".relink_exefs")) && Directory.Exists(Path.Combine(folder, "romfs"));
 
-    /// The prepared shaders, beside the game's program (gpu/vk: the translated programs and their index, the driver's
+    /// The prepared shaders, in the game folder itself (gpu/vk: the translated programs and their index, the driver's
     /// pipeline cache, the stamp of the preparation and its markers). Without them the next start prepares them all again.
+    /// (In the folder, not beside bin\relink-game.exe: the renderer names them from game_module_path, gpu/vk/vk_paths.h, which
+    /// answers with the folder above bin; a player's log: "program cache E:\games\relink\relink_programs.bin")
     /// Not the lists of what play has used (relink_pipeline_states.bin, relink_computes.bin) nor anything the build made
     /// (relink_shaders.bin, the _shipped files)
     static readonly string[] PreparedShaderFiles =
@@ -53,7 +55,7 @@ static class Game
     {
         int n = 0;
         long bytes = 0;
-        var dir = Path.GetDirectoryName(Exe(folder)) ?? folder;
+        var dir = folder;
         foreach (var name in PreparedShaderFiles)
         {
             var f = new FileInfo(Path.Combine(dir, name));
@@ -65,7 +67,7 @@ static class Game
     /// The prepared shaders deleted (the game must not be running): null, or why a file could not go
     public static string? DeletePreparedShaders(string folder)
     {
-        var dir = Path.GetDirectoryName(Exe(folder)) ?? folder;
+        var dir = folder;
         foreach (var name in PreparedShaderFiles)
         {
             var path = Path.Combine(dir, name);
@@ -89,6 +91,7 @@ sealed class Settings
 {
     // the game's rows (gpu/vk/vk_menu.cpp: ini keys are the row names, lower case, spaces as underscores)
     public int Fullscreen = 1, FrameGeneration = 0, FramePacing = 0, FrameRate = 0, Resolution = 1, Upscaling = 0, Sharpness = 0,
+               VSync = 0,   // (the game's V-Sync row, saved as v-sync: 0 off, 1 on, FIFO)
                GameSpeed = 0, Handheld = 0, Ultrawide = 0, FpsCounter = 0,
                Upscaler = 0;   // (the game's Upscaler row, saved as dlss: 0 the game's own, 1 NVIDIA DLSS, 2 NVIDIA DLAA, 3 AMD FSR, 4 AMD FSR native AA)
     // the launcher's
@@ -168,6 +171,7 @@ sealed class Settings
         FrameGeneration = Int(g, "frame_generation", 0, 0, 4);
         if (FrameGeneration == 1) FrameGeneration = 2;
         FramePacing = Int(g, "frame_pacing", 0, 0, 1);
+        VSync = Int(g, "v-sync", 0, 0, 1);
         FrameRate = Int(g, "frame_rate", 0, 0, 2);   // (2: 30, smooth: HOS_FPS_CAP=30)
         // (the game's Render resolution row: 0 Auto, 1..6 = 100 %, 75 %, 67 %, 50 %, 58 %, 33 % of the output; 1, native, by default)
         Resolution = Int(g, "resolution", 1, 0, 6);
@@ -197,7 +201,7 @@ sealed class Settings
 
     static readonly HashSet<string> Known = new(StringComparer.OrdinalIgnoreCase)
     {
-        "fullscreen", "frame_generation", "frame_pacing", "frame_rate", "resolution", "upscaling", "sharpness", "game_speed",
+        "fullscreen", "frame_generation", "frame_pacing", "v-sync", "frame_rate", "resolution", "upscaling", "sharpness", "game_speed",
         "handheld_profile", "ultrawide", "fps_counter", "dlss",
     };
 
@@ -220,6 +224,7 @@ sealed class Settings
         Row("fullscreen", Fullscreen);
         Row("frame_generation", FrameGeneration);
         Row("frame_pacing", FramePacing);
+        Row("v-sync", VSync);
         Row("frame_rate", FrameRate);
         Row("resolution", Resolution);
         Row("upscaling", Upscaling);

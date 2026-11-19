@@ -30,6 +30,7 @@ import re
 import shutil
 import stat
 import subprocess
+import threading
 import time
 import sys
 import tempfile
@@ -77,23 +78,31 @@ STAGE_SHARE = {"read": (0.0, 0.1), "lift": (0.1, 0.25), "compile": (0.25, 0.95),
 progress_lines = {"on": False, "lo": 0.0, "hi": 0.0, "text": ""}
 
 
+OUT_LOCK = threading.RLock()   # (whole lines: the steps that run beside the lift and the compile (Background) print too)
+
+
+def out_line(line, file=None):
+    with OUT_LOCK:
+        print(line, file=file, flush=True)
+
+
 def say(*words):
-    print("@@" + " ".join(str(w) for w in words), flush=True)
+    out_line("@@" + " ".join(str(w) for w in words))
     p = progress_lines
     if not p["on"] or not words:
         return
     if words[0] == "stage" and len(words) >= 3:
         p["lo"], p["hi"] = STAGE_SHARE.get(words[1], (p["hi"], p["hi"]))
         p["text"] = " ".join(str(w) for w in words[2:])
-        print("progress %.3f %s" % (p["lo"], p["text"]), flush=True)
+        out_line("progress %.3f %s" % (p["lo"], p["text"]))
     elif words[0] == "progress" and len(words) == 2:
         try:
             f = min(1.0, max(0.0, float(words[1])))
         except ValueError:
             return
-        print("progress %.3f %s" % (p["lo"] + f * (p["hi"] - p["lo"]), p["text"]), flush=True)
+        out_line("progress %.3f %s" % (p["lo"] + f * (p["hi"] - p["lo"]), p["text"]))
     elif words[0] == "done":
-        print("progress 1 The game is ready", flush=True)
+        out_line("progress 1 The game is ready")
 
 
 def fail(text):
@@ -274,7 +283,7 @@ def run(cmd, env=None, on_line=None, check=True, output=None, plain_stop=None):
     lines = []
     for line in p.stdout:
         line = line.rstrip()
-        print(line, file=output, flush=True)
+        out_line(line, file=output)
         lines.append(line)
         if on_line:
             on_line(line)
@@ -288,6 +297,70 @@ def run(cmd, env=None, on_line=None, check=True, output=None, plain_stop=None):
         status = "signal %d" % -code if os.name == "posix" and code < 0 else "exit status %d" % code
         fail("%s stopped (%s): %s" % (step, status, killed_reason() if os.name == "posix" and -code in (9, 15) else failure_reason(lines)))
     return code
+
+
+class Background:
+    """(relink) A step that runs beside the lift and the compile, in a thread: unpacking the game files (26 GB, which neither the
+    lift nor the compile reads) and the steps that read them (the shader list, the dump repair, the Travel places, the wheel, the
+    button prompts). A first build waited for all of them in turn: minutes before the lift began, and ~20 s after the compile.
+    Its lines go to the build's output whole, its failure is said when the build waits for it (wait): never an @@ line from
+    here, so the builder's stages and bar stay the main steps'. Its processes end with the build (a build that stops)"""
+    procs = []
+
+    def __init__(self, name, work):
+        self.name, self.error, self.state = name, None, ""
+        self.thread = threading.Thread(target=self._run, args=(work,), name=name, daemon=True)
+        self.thread.start()
+
+    def _run(self, work):
+        try:
+            work(self)
+        except SystemExit as e:
+            self.error = e.code if isinstance(e.code, str) else "%s stopped" % self.name
+        except Exception as e:   # (said when the build waits for it, with what it was doing)
+            self.error = "%s: %s: %s" % (self.name, type(e).__name__, e)
+
+    def run(self, cmd, on_line=None):
+        """A step's process; True when it ended well, else self.error says why (fail() is not called from here)"""
+        e = dict(os.environ, PYTHONIOENCODING="utf-8")
+        p = subprocess.Popen(cmd, cwd=ROOT, env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                             errors="replace", bufsize=1)
+        Background.procs.append(p)
+        no_throttle(getattr(p, "_handle", None))
+        lines = []
+        for line in p.stdout:
+            line = line.rstrip()
+            out_line("%s: %s" % (self.name, line.strip()))
+            lines.append(line)
+            if on_line:
+                on_line(line)
+        p.stdout.close()
+        code = p.wait()
+        if code:
+            step = next((os.path.basename(c) for c in cmd[1:] if c.endswith(".py")), os.path.basename(cmd[-1]))
+            self.error = "%s stopped (exit status %d): %s" % (step, code, failure_reason(lines))
+        return code == 0
+
+    def wait(self, waiting=None):
+        """Its end; its failure, or None. waiting(): said every 15 s while it runs"""
+        while self.thread.is_alive():
+            self.thread.join(15)
+            if self.thread.is_alive() and waiting:
+                waiting(self)
+        return self.error
+
+    @staticmethod
+    def stop_all():
+        for p in Background.procs:
+            if p.poll() is None:
+                try:
+                    p.kill()
+                except OSError:
+                    pass
+
+
+import atexit
+atexit.register(Background.stop_all)   # (a build that stops (fail) leaves no unpacking behind it, writing into the folder)
 
 
 def build_id(main):
@@ -319,16 +392,23 @@ def check_supported_build(exefs):
 ROMFS_TABLE = "ResourceSizeTable.Product.111.Nin_Ounce_NVN2.rsizetable.zs"   # (the supported version's, in System/Resource)
 
 
-def romfs_problem(romfs, nup=None):
+def romfs_problem(romfs, nup=None, resource=None):
     """(issue 26) Why a romfs folder chosen by hand is not the supported game's RomFS, or None. A romfs taken from another PC
     port's folder (a few packed .bin files, no subfolders) was accepted, built for 40 minutes, and the game died in its first
     second: its own allocator returned null. The game's RomFS has System/Resource/<the table above> and hundreds of folders.
     (issue 88) nup: the romfs was read from this .nup file, whose code is the supported build's: a dump with the update's code
-    and the first version's files was built in full, and the game then said at each start that its files are another version's"""
-    res = os.path.join(romfs, "System", "Resource")
-    if os.path.isfile(os.path.join(res, ROMFS_TABLE)):
-        return None
-    others = sorted(f for f in os.listdir(res) if f.startswith("ResourceSizeTable")) if os.path.isdir(res) else []
+    and the first version's files was built in full, and the game then said at each start that its files are another version's.
+    resource: the names in the RomFS's System/Resource as the .nup's table lists them (nup.resource_names), when the files
+    are not unpacked yet"""
+    if resource is not None:
+        if ROMFS_TABLE in resource:
+            return None
+        others = sorted(f for f in resource if f.startswith("ResourceSizeTable"))
+    else:
+        res = os.path.join(romfs, "System", "Resource")
+        if os.path.isfile(os.path.join(res, ROMFS_TABLE)):
+            return None
+        others = sorted(f for f in os.listdir(res) if f.startswith("ResourceSizeTable")) if os.path.isdir(res) else []
     if nup:
         return ("The game files in %s are %s (ReLink needs the version whose files have System\\Resource\\%s), while its code is "
                 "the supported version's. The game's code and files must be from the same version: dump the game again with its "
@@ -688,6 +768,8 @@ def stop_stray_compilers(work, default_work):
                 doomed[q["ProcessId"]] = n
             elif ("build.py" in c or "lift.py" in c) and "--standalone" in c and q["ParentProcessId"] not in alive:
                 doomed[q["ProcessId"]] = n           # (its make_game is gone)
+            elif "nup.py" in c and "--extract" in c and "--only" in c and q["ParentProcessId"] not in alive:
+                doomed[q["ProcessId"]] = n           # (a package unpacked beside a build that is gone: Background)
             elif not n.startswith("python") and w in c:
                 doomed[q["ProcessId"]] = n
         for k in doomed:
@@ -892,19 +974,28 @@ def profile_readable(prof):
     return r.returncode == 0
 
 
-def link_or_copy(src, dst):
-    """the romfs by hard links where the disk allows: 26 GB not written twice"""
-    files = [os.path.join(d, f) for d, _, fs in os.walk(src) for f in fs]
-    for i, s in enumerate(files):
-        t = os.path.join(dst, os.path.relpath(s, src))
-        os.makedirs(os.path.dirname(t), exist_ok=True)
-        if not os.path.exists(t):
+def link_or_copy(src, dst, progress=True):
+    """the romfs by hard links where the disk allows: 26 GB not written twice. (relink) One folder made per folder and the link
+    tried at once (a file already there: kept), not a makedirs and an exists per file: 186587 files, ~35 s of it on a rebuild.
+    progress=False: no @@progress lines (it runs beside the lift and the compile, Background)"""
+    walked = list(os.walk(src))
+    total = max(1, sum(len(fs) for _, _, fs in walked))
+    i = 0
+    for d, _, fs in walked:
+        t_dir = os.path.join(dst, os.path.relpath(d, src))
+        os.makedirs(t_dir, exist_ok=True)
+        for f in fs:
+            s, t = os.path.join(d, f), os.path.join(t_dir, f)
             try:
                 os.link(s, t)
+            except FileExistsError:
+                pass
             except OSError:
-                shutil.copy2(s, t)
-        if i % 500 == 0:
-            say("progress", "%.3f" % (i / max(1, len(files))))
+                if not os.path.exists(t):
+                    shutil.copy2(s, t)
+            i += 1
+            if progress and i % 500 == 0:
+                say("progress", "%.3f" % (i / total))
 
 
 def shader_census_cmd(romfs, out):
@@ -929,10 +1020,23 @@ def lift_key(exefs, work, env):
     files = [(exefs, os.path.join(exefs, f)) for f in sorted(os.listdir(exefs))]
     if env.get("OOT_EXEFS_PATCHES"):   # (exefs mods: which patch changed which bytes, for the lift's lines; none without them)
         files.append((os.path.dirname(env["OOT_EXEFS_PATCHES"]), env["OOT_EXEFS_PATCHES"]))
+    # (relink, 17/11) Of nx2/'s Python files, those the last lift loaded (<gen>/.lift_sources, kit.note_sources), when it says:
+    # a change to the builder's other steps (this file, build.py, the assets' scripts) translated the game again, minutes for
+    # the same C. A file the lift loads that changed is in the list, and a new import comes with a change to a file in it.
+    # Without the list (a lift before this), all of them, as before
+    sources = lift_sources(work)
     for top in (HERE, os.path.join(ROOT, "third_party", "a64-kit")):
         for d, dirs, fs in os.walk(top):
             dirs[:] = sorted(x for x in dirs if x != "__pycache__")
-            files += [(ROOT, os.path.join(d, f)) for f in sorted(fs) if f.endswith((".py", ".c", ".h", ".cpp", ".hpp", ".txt", ".json"))]
+            for f in sorted(fs):
+                if not f.endswith((".py", ".c", ".h", ".cpp", ".hpp", ".txt", ".json")):
+                    continue
+                if sources is not None and top == HERE and f.endswith(".py") and \
+                        os.path.relpath(os.path.join(d, f), HERE).replace(os.sep, "/") not in sources:
+                    continue
+                files.append((ROOT, os.path.join(d, f)))
+    if sources is not None:
+        h.update(("\n".join(sorted(sources)) + "\n").encode())
     files += [(work, os.path.join(work, "hot_funcs.txt")), (work, os.path.join(work, "image", "chunks.txt"))]
     for base, f in files:
         if os.path.isfile(f):
@@ -945,6 +1049,25 @@ def lift_key(exefs, work, env):
     lift_env = {k: v for k, v in lift_env.items() if k not in ("RX_PGO", "RX_VK_PGO", "RX_VK_PGO_FILE")}
     h.update(repr(sorted(lift_env.items())).encode())
     return h.hexdigest()
+
+
+def lift_sources(work):
+    """The nx2/ Python files the last lift in <work>/sa/gen loaded (kit.note_sources), or the kept lift's (LIFT_KEPT) when
+    sa/gen is gone, or None: no list (a lift before it)"""
+    for folder in (os.path.join(work, "sa", "gen"), os.path.join(work, LIFT_KEPT)):
+        try:
+            with open(os.path.join(folder, kit_sources_name()), encoding="utf-8") as f:
+                names = {line.strip() for line in f if line.strip()}
+        except OSError:
+            continue
+        if names:
+            return names
+    return None
+
+
+def kit_sources_name():
+    import kit
+    return kit.LIFT_SOURCES
 
 
 def gen_print(gen):
@@ -977,6 +1100,98 @@ def lifted_before(work, key):
     if len(lines) != 2 or lines[0] != key or lines[1] != gen_print(gen):
         return False
     return os.path.isfile(os.path.join(image, "image.bin")) and os.path.isfile(os.path.join(gen, "a64_table.c"))
+
+
+LIFT_KEPT = "lift_kept"   # (in <work>: the last lift's C and image, compressed, kept for the next update when sa goes)
+
+
+def _codec():
+    """zstandard (the builder's own), else zlib: (extension, compress, decompress)"""
+    try:
+        import zstandard
+        return (".zst", lambda b: zstandard.ZstdCompressor(level=3).compress(b),
+                lambda b: zstandard.ZstdDecompressor().decompress(b, max_output_size=1 << 32))
+    except ImportError:
+        import zlib
+        return ".zz", lambda b: zlib.compress(b, 1), zlib.decompress
+
+
+def keep_lift(work, key):
+    """(relink, 17/11) The lifted C and its image, compressed into <work>/lift_kept before sa goes at the end of a player's build
+    (~1.5 GB of C as ~100 MB, 2 s on 12 threads). The next update whose lift key is the same takes them back (restore_lift)
+    instead of translating the game again: the lift was the longest step of an update that changed the engine alone. Returns
+    the bytes kept, 0 when nothing could be"""
+    from concurrent.futures import ThreadPoolExecutor
+    kept = os.path.join(work, LIFT_KEPT)
+    shutil.rmtree(kept, ignore_errors=True)
+    if not lifted_before(work, key):
+        return 0
+    ext, comp, _ = _codec()
+    todo = []
+    for sub in ("gen", "image"):
+        src = os.path.join(work, "sa", sub)
+        os.makedirs(os.path.join(kept, sub), exist_ok=True)
+        todo += [(os.path.join(src, n), os.path.join(kept, sub, n + ext)) for n in sorted(os.listdir(src))
+                 if n != LIFT_KEY and os.path.isfile(os.path.join(src, n))]
+
+    def one(pair):
+        with open(pair[0], "rb") as f:
+            data = comp(f.read())
+        with open(pair[1], "wb") as f:
+            f.write(data)
+        return len(data)
+
+    try:
+        with ThreadPoolExecutor(max(1, min(8, os.cpu_count() or 1))) as ex:
+            total = sum(ex.map(one, todo))
+        shutil.copy2(os.path.join(work, "sa", "gen", kit_sources_name()), os.path.join(kept, kit_sources_name()))
+        with open(os.path.join(kept, "key.txt"), "w") as f:   # (last: a pack cut short has no key and is never taken)
+            f.write(key + "\n" + ext + "\n")
+    except (OSError, MemoryError) as e:
+        print("the translated code was not kept for the next update (%s): it will translate the game again" % e, flush=True)
+        shutil.rmtree(kept, ignore_errors=True)
+        return 0
+    return total
+
+
+def restore_lift(work, key):
+    """The lift kept by keep_lift, back in <work>/sa when its key is this build's: True when it is"""
+    from concurrent.futures import ThreadPoolExecutor
+    kept = os.path.join(work, LIFT_KEPT)
+    try:
+        with open(os.path.join(kept, "key.txt")) as f:
+            stored, ext = (f.read().split() + ["", ""])[:2]
+    except OSError:
+        return False
+    codec = _codec()
+    if stored != key or ext != codec[0]:
+        return False
+    decomp = codec[2]
+    todo = []
+    for sub in ("gen", "image"):
+        dst = os.path.join(work, "sa", sub)
+        if os.path.isdir(dst):
+            shutil.rmtree(dst)
+        os.makedirs(dst)
+        todo += [(os.path.join(kept, sub, n), os.path.join(dst, n[:-len(ext)])) for n in sorted(os.listdir(os.path.join(kept, sub)))
+                 if n.endswith(ext)]
+
+    def one(pair):
+        with open(pair[0], "rb") as f:
+            data = decomp(f.read())
+        with open(pair[1], "wb") as f:
+            f.write(data)
+
+    try:
+        with ThreadPoolExecutor(max(1, min(8, os.cpu_count() or 1))) as ex:
+            list(ex.map(one, todo))
+    except Exception as e:   # (OSError, MemoryError, zstandard.ZstdError, zlib.error: any of them, the lift runs instead)
+        print("the translated code kept from the last build could not be read back (%s): translating the game again" % e, flush=True)
+        for sub in ("gen", "image"):
+            shutil.rmtree(os.path.join(work, "sa", sub), ignore_errors=True)
+        return False
+    write_lift_key(work, key)
+    return lifted_before(work, key)
 
 
 def ngx_script():
@@ -1080,6 +1295,47 @@ def parse_args():
     return a
 
 
+def game_data(bg, files_job, romfs, out):
+    """(relink) What the build makes from the game's own files (the RomFS) for the game folder, in a Background beside the lift and
+    the compile: once the files are in place (files_job, the unpacking or linking, waited for first), the steps one after the
+    other. None of them stops the build: each says what the game does without its file"""
+    if files_job is not None:
+        error = files_job.wait()
+        if error:
+            raise SystemExit(error)
+    # every shader of the game, for its first start to translate (gpu/vk/vk_shader.cpp seed_open). Without it the game still runs, compiling them
+    # as it meets them: not worth stopping a finished build for
+    if run(shader_census_cmd(romfs, os.path.join(out, "relink_shaders.bin")), check=False, output=sys.stderr):
+        out_line("the shader list was not made: the game will compile its shaders as it plays")
+    # (issue 14) Some dumps hold textures whose first kilobytes are zeros; the game cannot decode them and never finishes loading
+    # the models that need one: the fairy fountains' floor and walls were not drawn, and as an adult the model was loaded again
+    # and again for good; a damaged piece of an area's baked lighting leaves what it lights black. tools/dump_repair.py finds
+    # every damaged texture and writes a small mod that stands in for those that have an intact relative, from the player's own
+    # files; it was a step for the player to run by hand (README), now every build does it. Not worth stopping a build for
+    repair = os.path.join(ROOT, "tools", "dump_repair.py")
+    if os.path.isfile(repair) and run(PY + [repair, romfs, os.path.join(out, "mods", "00-dump-repair")], check=False,
+                                      output=sys.stderr):
+        out_line("the dump's damaged textures were not checked: the game runs without the stand-ins")
+    # (relink) the Travel places' positions, arrival events and story marks (gpu/vk/oot_tp_places_data.h), from the
+    # player's own maps (nx2/teleport_places.py, zstandard alone). Without them the places arrive with the plain event, no pictures
+    if run(PY + [os.path.join(HERE, "teleport_places.py"), "--romfs", romfs, "--out", out], check=False, output=sys.stderr):
+        out_line("the Travel places' data was not made: they arrive with the plain event and take no pictures")
+    # (relink) the item wheel's icons, names and sounds (gpu/vk/vk_wheel.cpp, host/oot_wheel.c, host/nn_audio.c): the game's own,
+    # from the RomFS, at every build (nx2/wheel_assets.py). Without them the wheel shows the items' names in English, silently
+    wheel = os.path.join(out, "wheel")
+    for script, opt, name, without in (("wheel_assets.py", "--icons", "icons.bin", "it shows the items' names"),
+                                       ("wheel_names.py", "--out", "names.bin", "it names the items in English"),
+                                       ("wheel_sounds.py", "--out", "sounds.bin", "it is silent")):
+        if run(PY + [os.path.join(HERE, script), "--romfs", romfs, opt, os.path.join(wheel, name)], check=False, output=sys.stderr):
+            out_line("the item wheel's %s was not made: %s" % (name, without))
+    # (relink, issues 34, 63, 68, 20) the button prompts' fonts: the game's own button font with ReLink's Xbox and PlayStation
+    # labels, and where the host patches them for the bindings (nx2/button_glyphs.py, host/prompts.c). Without them the game
+    # shows the Switch's buttons whatever the Button prompts row says
+    if run(PY + [os.path.join(HERE, "button_glyphs.py"), "--romfs", romfs, "--out", os.path.join(out, "prompts")], check=False,
+           output=sys.stderr):
+        out_line("the button prompts' fonts were not made: the game shows the Switch's buttons")
+
+
 def main(a=None):
     if a is None:
         a = parse_args()
@@ -1129,6 +1385,7 @@ def main(a=None):
     romfs = os.path.join(out, "romfs")
 
     say("stage", "read", "Reading your game files")
+    files_job = None   # (the RomFS unpacked or linked beside the lift and the compile: Background)
     shutil.rmtree(exefs, ignore_errors=True)
     kept = os.path.join(out, ".relink_exefs")   # (the game's code as read, kept in the folder: what an update builds from again)
     if a.update:
@@ -1156,26 +1413,56 @@ def main(a=None):
             shutil.copytree(kept, exefs)
         else:
             shutil.rmtree(game, ignore_errors=True)
-            run(PY + ["nx2/nup.py", a.nup, "--extract", game])
+            # (relink) The code first (5 files, 38 MB): the lift and the compile read nothing else. The RomFS (186587 files, 26 GB)
+            # is unpacked beside them (Background) and put in place before the steps that read it; a first build waited for it
+            # before it began translating (~5 minutes here at 92 MB/s from a USB SSD, far longer from a hard disk). Its version
+            # is checked first from the package's own table of names (issue 88: said before anything is built)
+            run(PY + ["nx2/nup.py", a.nup, "--extract", game, "--only", "exefs"])
             # Keep the last usable cache until the new package has been read and validated.
             staged_exefs = os.path.join(game, "exefs")
             check_modules(staged_exefs)
             check_supported_build(staged_exefs)
-            if not os.path.isdir(os.path.join(game, "romfs")):
+            import nup as nup_file
+            try:
+                resource = nup_file.resource_names(a.nup)
+            except (OSError, ValueError, IndexError) as e:
+                fail("The .nup file could not be read: %s. Download or copy it again." % e)
+            if resource is None:
+                shutil.rmtree(game, ignore_errors=True)
                 fail("The package did not contain a romfs folder.")
-            why = romfs_problem(os.path.join(game, "romfs"), nup=a.nup)   # (issue 88: said before anything is built)
+            why = romfs_problem(None, nup=a.nup, resource=resource)
             if why:
                 shutil.rmtree(game, ignore_errors=True)
                 fail(why)
-            if os.path.exists(romfs):
-                shutil.rmtree(romfs)
-            shutil.move(os.path.join(game, "romfs"), romfs)
             shutil.move(staged_exefs, exefs)
-            shutil.rmtree(game, ignore_errors=True)
             shutil.rmtree(kept, ignore_errors=True)
             shutil.copytree(exefs, kept)
-            with open(good, "w") as f:
-                f.write(stamp + chr(10))
+
+            def unpack(bg, nup_path=a.nup):
+                gb = {"have": 0.0, "of": 0.0}
+
+                def line(text):
+                    m = re.match(r"\s*title \d+: .* romfs \d+ files, ([\d.]+) GB", text)
+                    if m and not gb["of"]:
+                        gb["of"] = float(m.group(1))
+                    m = re.match(r"\s*\d+ files, ([\d.]+) GB", text)
+                    if m:
+                        gb["have"] = float(m.group(1))
+                        bg.state = "%.1f of %.1f GB" % (gb["have"], gb["of"]) if gb["of"] else "%.1f GB" % gb["have"]
+                if not bg.run(PY + ["nx2/nup.py", nup_path, "--extract", game, "--only", "romfs", "--yield"], on_line=line):
+                    return
+                if not os.path.isdir(os.path.join(game, "romfs")):
+                    bg.error = "The package did not contain a romfs folder."
+                    return
+                if os.path.exists(good):   # (an earlier .nup's: stopped halfway below, its files would pass for read)
+                    os.remove(good)
+                if os.path.exists(romfs):
+                    shutil.rmtree(romfs)
+                shutil.move(os.path.join(game, "romfs"), romfs)
+                shutil.rmtree(game, ignore_errors=True)
+                with open(good, "w") as f:   # (last: a build stopped before this unpacks the files again)
+                    f.write(stamp + chr(10))
+            files_job = Background("game files", unpack)
         check_modules(exefs)
     else:
         why = romfs_problem(a.romfs)   # (issue 26: said before anything is read or built)
@@ -1183,7 +1470,8 @@ def main(a=None):
             fail(why)
         shutil.copytree(a.exefs, exefs)   # (unpacked in place: the user's copy stays as it is)
         run(PY + ["nx2/unpack.py", exefs])
-        link_or_copy(a.romfs, romfs)
+        # (relink) the RomFS's 186587 links beside the lift and the compile, which do not read it (Background)
+        files_job = Background("game files", lambda bg, src=a.romfs: link_or_copy(src, romfs, progress=False))
         check_cache_paths(out, (kept,))
         shutil.rmtree(kept, ignore_errors=True)
         shutil.copytree(exefs, kept)
@@ -1200,6 +1488,9 @@ def main(a=None):
              "folder name, and build again." % (mods_root, e))
     code = patched.exefs
     say("progress", "1")
+    # (relink) what the game makes from its own files, beside the lift and the compile once they are in place (Background): it
+    # reads only the RomFS and writes only these data files. Started after the exefs mods were read (the dump repair writes a mod)
+    data_job = Background("game data", lambda bg, wait_for=files_job: game_data(bg, wait_for, romfs, out))
 
     # (made once on the development PC: lists of addresses and counts, no game code)
     for name in ("hot_funcs.txt", "hot_order.txt", "relink_pieces.prof", "relink_vk.profdata", "relink.res"):
@@ -1230,6 +1521,8 @@ def main(a=None):
     gen_dir = os.path.join(work, "sa", "gen")
     if lifted_before(work, key):
         print("the game was translated with these tools before: translating it again is skipped", flush=True)
+    elif restore_lift(work, key):
+        print("the translation the last build kept is this one: translating the game again is skipped", flush=True)
     else:
         key_file = os.path.join(work, "sa", "gen", LIFT_KEY)
         if os.path.exists(key_file):
@@ -1254,6 +1547,9 @@ def main(a=None):
         run(PY + ["nx2/lift.py", "--standalone", "--write", "--exefs", code, "--work", work], env, plain_stop=stop)
         if os.path.isfile(os.path.join(work, "sa", "gen", "code_hot.c")):
             run(PY + ["nx2/split_hot.py", os.path.join(work, "sa", "gen")], env)   # (eight files side by side: ~6 minutes, not 79)
+        # (the key again, from the files this lift loaded (.lift_sources): what the next build computes. The one above may have been
+        # from all of nx2/, a lift before the list)
+        key = lift_key(code, work, env)
         write_lift_key(work, key)
 
     # (relink) the Vulkan library's own profile, made like the game code's (work/relink_vk.profdata): passed to the compile unless
@@ -1325,6 +1621,7 @@ def main(a=None):
         key_file = os.path.join(work, "sa", "gen", LIFT_KEY)
         if os.path.exists(key_file):
             os.remove(key_file)
+        shutil.rmtree(os.path.join(work, LIFT_KEPT), ignore_errors=True)   # (and the kept one: the next build lifts from scratch)
         # (and its compiled objects go too: a cached runtime object from another version linked with every object "compiled in 0s"
         # and a64_dirty, a64_icall, a64_lookup, recomp_cntpct undefined, at every try (issue 1197, Linux, v2.0.10))
         for sub in (os.path.join(work, "objcache"), os.path.join(work, "sa", "build", "obj")):
@@ -1334,6 +1631,12 @@ def main(a=None):
     compile_seconds = time.time() - compile_started
 
     say("stage", "finish", "Putting the game folder together")
+    # (relink) the game files unpacked beside the lift and the compile (Background): in place before the new game goes in, so a
+    # package that could not be unpacked leaves the folder's game as it was
+    if files_job is not None:
+        error = files_job.wait(lambda bg: out_line("still unpacking the game files: %s" % (bg.state or "a moment")))
+        if error:
+            fail(error)
     built = os.path.join(work, "sa", "build")
     # (the new files are copied in beside the old ones as <name>.new and swapped in only once all are complete: a build stopped while
     # copying, or a full disk, left a half-written 460 MB relink-game.exe and no game to play. The old game stays playable until the swap)
@@ -1399,43 +1702,17 @@ def main(a=None):
             except OSError:
                 pass
     place_ngx_runtime(out)
-    # every shader of the game, for its first start to translate (gpu/vk/vk_shader.cpp seed_open). Without it the game still runs, compiling them
-    # as it meets them: not worth stopping a finished build for
-    if run(shader_census_cmd(romfs, os.path.join(out, "relink_shaders.bin")), check=False, output=sys.stderr):
-        print("the shader list was not made: the game will compile its shaders as it plays", flush=True)
-    # (issue 14) Some dumps hold textures whose first kilobytes are zeros; the game cannot decode them and never finishes loading
-    # the models that need one: the fairy fountains' floor and walls were not drawn, and as an adult the model was loaded again
-    # and again for good; a damaged piece of an area's baked lighting leaves what it lights black. tools/dump_repair.py finds
-    # every damaged texture and writes a small mod that stands in for those that have an intact relative, from the player's own
-    # files; it was a step for the player to run by hand (README), now every build does it. Not worth stopping a build for
-    repair = os.path.join(ROOT, "tools", "dump_repair.py")
-    if os.path.isfile(repair) and run(PY + [repair, romfs, os.path.join(out, "mods", "00-dump-repair")], check=False,
-                                      output=sys.stderr):
-        print("the dump's damaged textures were not checked: the game runs without the stand-ins", flush=True)
     icon = os.path.join(ROOT, "assets", "relink.png")
     if LINUX and os.path.exists(icon):   # (the window's icon: host/posix/display_sdl.c)
         shutil.copy2(icon, os.path.join(out, "relink.png"))
-    # (relink) the Travel places' positions, arrival events and story marks (gpu/vk/oot_tp_places_data.h), from the
-    # player's own maps (nx2/teleport_places.py, zstandard alone). Without them the places arrive with the plain event, no pictures
-    if run(PY + [os.path.join(HERE, "teleport_places.py"), "--romfs", romfs, "--out", out], check=False, output=sys.stderr):
-        print("the Travel places' data was not made: they arrive with the plain event and take no pictures", flush=True)
     seed_pipelines(out)
     ship_state_list(out)
     ship_compute_list(out)
-    # (relink) the item wheel's icons, names and sounds (gpu/vk/vk_wheel.cpp, host/oot_wheel.c, host/nn_audio.c): the game's own,
-    # from the RomFS, at every build (nx2/wheel_assets.py). Without them the wheel shows the items' names in English, silently
-    wheel = os.path.join(out, "wheel")
-    for script, opt, name, without in (("wheel_assets.py", "--icons", "icons.bin", "it shows the items' names"),
-                                       ("wheel_names.py", "--out", "names.bin", "it names the items in English"),
-                                       ("wheel_sounds.py", "--out", "sounds.bin", "it is silent")):
-        if run(PY + [os.path.join(HERE, script), "--romfs", romfs, opt, os.path.join(wheel, name)], check=False, output=sys.stderr):
-            print("the item wheel's %s was not made: %s" % (name, without), flush=True)
-    # (relink, issues 34, 63, 68, 20) the button prompts' fonts: the game's own button font with ReLink's Xbox and PlayStation
-    # labels, and where the host patches them for the bindings (nx2/button_glyphs.py, host/prompts.c). Without them the game
-    # shows the Switch's buttons whatever the Button prompts row says
-    if run(PY + [os.path.join(HERE, "button_glyphs.py"), "--romfs", romfs, "--out", os.path.join(out, "prompts")], check=False,
-           output=sys.stderr):
-        print("the button prompts' fonts were not made: the game shows the Switch's buttons", flush=True)
+    # (relink) the game's data from its own files (game_data), made beside the compile: waited for here, with the files' unpacking
+    # it needed first. Only the unpacking stops the build; each data step only says when it was not made, as before
+    error = data_job.wait(lambda bg: out_line("still making the game's data from its files"))
+    if error:
+        fail(error)
     language = os.path.join(out, "language.txt")   # (the same text as host/nn_applet.c writes)
     with open(language, "w", encoding="utf-8", newline="\n") as f:
         f.write("# The game's language. Change the line below to one of the codes listed here, save, and start the game again.\n\n%s\n\n" % a.language)
@@ -1464,6 +1741,16 @@ def main(a=None):
         # ready, on Windows and Linux alike. The next update translates and compiles again, about as long as a first build.
         # RELINK_KEEP_BUILD_FILES=1 keeps them for quick updates, as before)
         if os.environ.get("RELINK_KEEP_BUILD_FILES", "0") in ("", "0"):
+            # (relink, 17/11) the translated code kept compressed (~200 MB of the 1.6 GB): the next update that does not change
+            # the translator skips the lift. RELINK_KEEP_LIFT=0: not kept, as before
+            if os.environ.get("RELINK_KEEP_LIFT", "1") not in ("", "0"):
+                t_keep = time.time()
+                kept_lift = keep_lift(work, key)
+                if kept_lift:
+                    print("the translated code kept for the next update: %d MB in %s (%.1fs)" % (
+                        kept_lift >> 20, os.path.join(work, LIFT_KEPT), time.time() - t_keep), flush=True)
+            else:
+                shutil.rmtree(os.path.join(work, LIFT_KEPT), ignore_errors=True)
             for sub in ("sa", "probe"):
                 shutil.rmtree(os.path.join(work, sub), ignore_errors=True)
             kept = trim_object_cache(os.path.join(work, "objcache"))

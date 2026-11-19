@@ -33,7 +33,7 @@ sealed class Note
         Canvas.SetTop(label, textTop);
         Canvas.SetLeft(sub, x - width / 2);
         Canvas.SetTop(sub, textTop + size + 7);
-        sub.Foreground = B("BoneFaint");
+        sub.Foreground = B("StaffFaint");
         Parts = new UIElement[] { stem, head, label, sub };
         Waiting();
     }
@@ -53,14 +53,14 @@ sealed class Note
     {
         Still();
         head.Fill = Brushes.Transparent;
-        head.Stroke = stem.Stroke = B("BoneFaint");
-        label.Foreground = B("BoneFaint");
+        head.Stroke = stem.Stroke = B("StaffFaint");
+        label.Foreground = B("StaffFaint");
     }
 
     public void Active()
     {
         head.Fill = head.Stroke = stem.Stroke = B("Gold");
-        label.Foreground = B("Bone");
+        label.Foreground = B("StaffBone");
         head.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1, 0.35, TimeSpan.FromSeconds(0.9))
             { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever, EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut } });
     }
@@ -69,14 +69,14 @@ sealed class Note
     {
         Still();
         head.Fill = head.Stroke = stem.Stroke = B("Gold");
-        label.Foreground = B("Bone");
+        label.Foreground = B("StaffBone");
     }
 
     public void Problem()
     {
         Still();
         head.Fill = head.Stroke = stem.Stroke = B("Warn");
-        label.Foreground = B("Bone");
+        label.Foreground = B("StaffBone");
     }
 }
 
@@ -97,7 +97,7 @@ sealed class Staff
     {
         canvas.Children.Clear();
         notes.Clear();
-        var line = (Brush)Application.Current.FindResource("BoneFaint");
+        var line = (Brush)Application.Current.FindResource("StaffFaint");   // (over the sky: light)
         for (var i = 0; i < 5; i++)
             canvas.Children.Add(new Line { X1 = 0, X2 = Width, Y1 = Top + i * Gap, Y2 = Top + i * Gap, Stroke = line, StrokeThickness = 1, Opacity = 0.55, SnapsToDevicePixels = true });
         // the bar lines: one where the staff begins, the double one that ends a piece

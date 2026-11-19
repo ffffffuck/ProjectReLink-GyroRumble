@@ -19,6 +19,12 @@ release of their own, `builder-parts`. No game data is involved at any step.
 
 Players' launchers then offer the update: they compare the game folder's version with the latest release's tag.
 
+The package job also builds the Vulkan back end the way a player's PC does (the package's own tools, the play profile, the CPM
+part, the same llvm-mingw) and ships it in the app part as `tools/prebuilt/relink_vk.dll` with `relink_vk.dll.key`. A player's
+build takes it as it is when the key it works out is the same (`nx2/build.py` `vk_jobs_key`: the sources, flags, profile, CPM
+packages and compiler), and compiles its ~500 files itself otherwise (NVIDIA DLSS ticked, a CPU without AVX2). The build log says
+which: "the release's own build of it" or "compiled here".
+
 The release also gets `ProjectReLink-vX.Y.Z-Windows-x64.zip`: every part of `relink-setup.txt` in one zip, laid out as the
 setup installs them, with `recomplauncher.json` beside `ReLink.exe` (`scripts/release_parts.py zip`). RecompLauncher installs
 from it, runs `nx2/make_game.py --game <your copy> --out <its folder>\game --progress-lines` as its setup step and starts

@@ -41,6 +41,7 @@ import kit
 import lifted_c
 import rtgen
 import logo_rgba
+import fonts_embed
 import toolchain
 import version
 import win_manifest
@@ -343,16 +344,60 @@ def tree_rss(pid):
     return n
 
 
+class ProcessEntry(ctypes.Structure):   # (Windows' PROCESSENTRY32W, for the process tree under a compiler)
+    _fields_ = [("size", ctypes.c_uint32), ("usage", ctypes.c_uint32), ("pid", ctypes.c_uint32), ("heap", ctypes.c_size_t),
+                ("module", ctypes.c_uint32), ("threads", ctypes.c_uint32), ("parent", ctypes.c_uint32), ("prio", ctypes.c_long),
+                ("flags", ctypes.c_uint32), ("exe", ctypes.c_wchar * 260)]
+
+
+def win_tree_ws(pid):
+    """(Windows) The working set of a process and the processes it started, in bytes. llvm-mingw's clang.exe is a 14 KB wrapper
+    that runs the compiler (clang-<n>.exe) as a child: the wrapper alone read 4 MB for a compiler holding 1.4 GB, so the memory
+    gate counted every running compiler twice (in the free memory, and again as all of its need still to come) and a 4-thread
+    PC with 16 GB ran 2 compilers where 4 fit"""
+    k = ctypes.WinDLL("kernel32")
+    k.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    k.OpenProcess.restype = ctypes.c_void_p
+    snap = k.CreateToolhelp32Snapshot(0x2, 0)   # (TH32CS_SNAPPROCESS)
+    if not snap or snap == ctypes.c_void_p(-1).value:
+        return 0
+    kids = {}
+    try:
+        e = ProcessEntry()
+        e.size = ctypes.sizeof(ProcessEntry)
+        ok = k.Process32FirstW(ctypes.c_void_p(snap), ctypes.byref(e))
+        while ok:
+            kids.setdefault(e.parent, []).append(e.pid)
+            ok = k.Process32NextW(ctypes.c_void_p(snap), ctypes.byref(e))
+    finally:
+        k.CloseHandle(ctypes.c_void_p(snap))
+    total, todo, seen = 0, [pid], set()
+    while todo:
+        p = todo.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        todo += kids.get(p, [])
+        h = k.OpenProcess(0x1000, False, p)   # (PROCESS_QUERY_LIMITED_INFORMATION)
+        if not h:
+            continue
+        try:
+            c = ProcessMemory()
+            c.cb = ctypes.sizeof(ProcessMemory)
+            if ctypes.WinDLL("psapi").GetProcessMemoryInfo(ctypes.c_void_p(h), ctypes.byref(c), c.cb):
+                total += c.ws
+        finally:
+            k.CloseHandle(ctypes.c_void_p(h))
+    return total
+
+
 def rss_mb(proc):
-    """A running compiler's resident memory in MB (0: not known, or not started yet)"""
+    """A running compiler's resident memory in MB, with the processes it started (0: not known, or not started yet)"""
     if proc is None:
         return 0
     try:
         if os.name == "nt":
-            c = ProcessMemory()
-            c.cb = ctypes.sizeof(ProcessMemory)
-            ok = ctypes.WinDLL("psapi").GetProcessMemoryInfo(ctypes.c_void_p(int(proc._handle)), ctypes.byref(c), c.cb)
-            return c.ws >> 20 if ok else 0
+            return win_tree_ws(proc.pid) >> 20
         return tree_rss(proc.pid) >> 20
     except (OSError, ValueError, AttributeError, IndexError):
         return 0
@@ -360,9 +405,9 @@ def rss_mb(proc):
 
 def mem_need(src):
     """What compiling a file takes at its peak, in MB, a little over. Measured on a cold build (clang 23, x86-64): a chunk of lifted
-    code 0.4 GB + 50 MB per MB of C + 250 MB per MB of its largest function (1.5 GB for 24 MB of small functions, 2.2 GB for a 6 MB
-    function alone); a hot piece 0.8-1.3 GB whatever its size (-O2, the profile, inlining); the runtime's C files ~0.2 GB, the C++
-    files up to ~1 GB"""
+    code 0.15 GB + 58 MB per MB of C + 250 MB per MB of its largest function (17/11, the peak commit of the compiler under
+    llvm-mingw's wrapper: 7.3 MB of C 434 MB, 12.6 MB 747 MB, 23.9 MB 1411 MB; a 6 MB function alone 2.2 GB); a hot piece 0.8-1.3
+    GB whatever its size (-O2, the profile, inlining); the runtime's C files ~0.2 GB, the C++ files up to ~1 GB"""
     name = os.path.basename(src)
     if name.startswith("code_hot"):
         return COMPILER_MB
@@ -372,7 +417,7 @@ def mem_need(src):
         # (each function from the newline before its definition, as this was first measured)
         starts = [m.start() - 1 for m in lifted_c.HEAD_BYTES.finditer(text)] + [len(text)]
         largest = max([b - a for a, b in zip(starts, starts[1:])] or [0])
-        return int(400 + 50 * len(text) / (1 << 20) + 250 * largest / (1 << 20))
+        return int(150 + 58 * len(text) / (1 << 20) + 250 * largest / (1 << 20))
     return 1000 if src.endswith(".cpp") else 400
 
 
@@ -529,6 +574,29 @@ def flag_text(fl):
             f = f.replace(kit.ROOT, "<root>")
         kept.append(f)
     return " ".join(kept)
+
+
+def vk_jobs_key(vk_jobs):
+    """(relink) What the Vulkan back end is built from, as one key (tools/prebuilt/relink_vk.dll.key): each file's path under the
+    tools, its bytes, its flags (flag_text, the profile's path left out: its contents are in -DRX_VK_PROFILE_SHA1) and its headers,
+    the CPM packages' versions, and the compiler's version"""
+    h, seen = hashlib.sha1(), {}
+    compilers = sorted({j[0] for j in vk_jobs})
+    for c in compilers:
+        ver = subprocess.run([c, "--version"], capture_output=True, text=True, errors="replace").stdout.splitlines()[:1]
+        h.update(("%s %s\n" % (os.path.basename(c).lower(), " ".join(ver))).encode())
+    for name in ("vulkanheaders", "spirv-headers", "vulkanmemoryallocator"):
+        p = cpm_package(name)
+        h.update(("%s=%s\n" % (name, os.path.basename(p) if p else "")).encode())
+    for c, src, obj, fl, deps in sorted(vk_jobs, key=lambda j: os.path.basename(j[2])):
+        if id(deps) not in seen:
+            seen[id(deps)] = hashlib.sha1(deps).digest()
+        with open(src, "rb") as f:
+            body = hashlib.sha1(f.read()).digest()
+        rel = os.path.relpath(src, kit.ROOT).replace(os.sep, "/")
+        text = flag_text([f for f in fl if not f.startswith("-fprofile-instr-use=")])
+        h.update(("%s\0%s\0%s\0%s\0" % (rel, os.path.basename(c).lower(), os.path.basename(obj), text)).encode() + body + seen[id(deps)])
+    return h.hexdigest()
 
 
 def object_key(src, fl, deps):
@@ -767,6 +835,8 @@ def main():
     # its bytes are part of vk_menu.cpp's dependencies
     gen_dir = os.path.join(out, "gen")
     logo_text = logo_rgba.write(os.path.join(gen_dir, "relink_logo.h")).encode()
+    # (and the game's typeface, assets/fonts as bytes in a header of its own: nx2/fonts_embed.py; also vk_menu.cpp's)
+    logo_text += fonts_embed.write(os.path.join(gen_dir, "relink_fonts.h")).encode()
     os.makedirs(obj_dir, exist_ok=True)
     if os.environ.get("RX_VK_ONLY"):   # (the Vulkan back end needs no game: built so with no lift, as the AppImage's is)
         os.makedirs(gen, exist_ok=True)
@@ -823,6 +893,13 @@ def main():
     # instrumented build (RX_PGO=gen: no profile by definition) compile, and what keeps a function the profile does not match
     # from taking the PC down
     hot_fl = hot_fl + ["-mllvm", "-disable-hoisting-to-hotter-blocks=all"]
+    # (relink, RX_HOT_CAPTURE_USES=<n>, experiment) the hot pieces' own limit for the context's capture tracking (flags() gives every
+    # file 5000): the hottest functions use the context 12 000 to 68 000 times, past the limit the compiler takes the context
+    # for escaped, and every guest load or store then may touch it (each guest register written to memory at once, read back
+    # after every guest store)
+    if os.environ.get("RX_HOT_CAPTURE_USES"):
+        hot_fl = ["-capture-tracking-max-uses-to-explore=" + os.environ["RX_HOT_CAPTURE_USES"]
+                  if f.startswith("-capture-tracking-max-uses-to-explore=") else f for f in hot_fl]
     # (relink) RX_PGO=gen: code_hot.c counts its branches (host/pgo_rt.c writes them; -O1 builds much sooner, and the counters are
     # placed before the optimiser, so a profile from it fits the -O2 build). RX_PGO=<merged .prof>: built with that profile
     if PGO == "gen":
@@ -832,9 +909,14 @@ def main():
         # new profile kept the hot code built from the old one)
         with open(PGO, "rb") as f:
             hot_fl = hot_fl + ["-fprofile-instr-use=" + PGO, "-DRELINK_PROFILE_SHA1=" + hashlib.sha1(f.read()).hexdigest()[:16]]
+    # (relink) the hot pieces' native floating-point helpers (a64_hot_fp.inc, a64_lift.py NATIVE_FP): a file only they include,
+    # so it is in their keys alone and the other chunks' objects stay when it changes
+    hot_inc = os.path.join(gen, "a64_hot_fp.inc")
+    hot_deps = deps + (open(hot_inc, "rb").read() if os.path.exists(hot_inc) else b"")
     jobs = [(cc, s, os.path.join(obj_dir, os.path.basename(s)[:-2] + ".o"),
              giant_flags(s, hot_fl if os.path.basename(s).startswith("code_hot") else fl),
-             shim_deps if os.path.dirname(s) == NX2_RT else deps) for s in srcs]
+             shim_deps if os.path.dirname(s) == NX2_RT else hot_deps if os.path.basename(s).startswith("code_hot") else deps)
+            for s in srcs]
     # (issue 624) what the game code's object keys are made of, as short fingerprints: two builds' logs side by side say which part
     # changed when an update compiled everything again (the headers, the flags, the profile, or the lifted code itself)
     fp = lambda b: hashlib.sha1(b).hexdigest()[:10]
@@ -971,6 +1053,27 @@ def main():
             for f in ("win32_posix.c", "gdi_posix.c"):
                 vk_jobs.append((cc, os.path.join(POSIX, f), os.path.join(obj_dir, "vk_posix_" + f[:-2] + ".o"), cflags, pdeps))
         jobs += vk_jobs
+    # (relink) The Vulkan back end the release built already: tools/prebuilt/relink_vk.dll and its key, made by the workflow from
+    # these same tools (.github/workflows/windows.yml). Taken as it is when its key is this build's (vk_jobs_key: the sources, the
+    # flags, the profile, the headers, the CPM packages, the compiler), and its ~500 files are not compiled here: ~520 of a first
+    # build's ~12300 compile seconds, minutes on a 4-thread CPU. Any difference (NVIDIA DLSS's SDK, another CPU level, a profile
+    # of one's own, a source changed) compiles it here as before. RELINK_VK_PREBUILT_OFF=1: always compiled here
+    vk_key = vk_jobs_key(vk_jobs) if vk_jobs and not LINUX else None
+    if vk_key and not vk_prebuilt and not os.environ.get("RX_VK_ONLY") and \
+            os.environ.get("RELINK_VK_PREBUILT_OFF", "0") in ("", "0"):
+        pre = os.path.join(kit.ROOT, "prebuilt", VK_LIB)
+        try:
+            with open(pre + ".key") as f:
+                have = f.read().strip()
+        except OSError:
+            have = ""
+        if have == vk_key and os.path.isfile(pre):
+            print("the Vulkan back end: the release's own build of it (%s: the same sources, flags and profile)" % pre, flush=True)
+            built_vk = {j[2] for j in vk_jobs}
+            jobs = [j for j in jobs if j[2] not in built_vk]
+            vk_jobs, vk_prebuilt = [], pre
+        elif have:
+            print("the Vulkan back end: compiled here (the release's build of it is of other sources, flags or profile)", flush=True)
     vk_only = bool(os.environ.get("RX_VK_ONLY"))   # (the renderer alone, the game's objects as they are)
     if vk_only:
         jobs = list(vk_jobs)
@@ -1139,6 +1242,12 @@ def main():
         if LINUX and not check_vk_symbols(vdll):
             return 1
         print("linked %s: %d MB (%.0fs)" % (vdll, os.path.getsize(vdll) >> 20, time.time() - t))
+        if vk_key:   # (what it was built from: the workflow ships the two as tools/prebuilt, vk_jobs_key)
+            with open(vdll + ".key", "w", newline="\n") as f:
+                f.write(vk_key + "\n")
+    elif vk_prebuilt and not LINUX and a.standalone and not a.only and os.path.isfile(vk_prebuilt + ".key"):
+        import shutil
+        shutil.copyfile(vk_prebuilt + ".key", os.path.join(out, VK_LIB + ".key"))
     if a.dll and not a.only:
         dll = os.path.join(out, "relink_game.dll")   # (+ relink_game.map: crash offsets -> f_<guest address>)
         t = time.time()

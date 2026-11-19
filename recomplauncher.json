@@ -95,6 +95,15 @@
       "defaults": { "HOS_FPS_UNLOCKED": "0", "HOS_FPS_CAP": "0" }
     },
     {
+      "id": "v-sync", "label": "V-Sync", "group": "Smoothness",
+      "help": "Shows each frame in step with the display's refresh, so the picture never tears. For cards whose driver has no mailbox mode (AMD and Intel on Windows).",
+      "choices": [
+        { "label": "Off", "set": { "v-sync": "0" } },
+        { "label": "On", "set": { "v-sync": "1" } }
+      ],
+      "defaults": { "v-sync": "0" }
+    },
+    {
       "id": "frame_generation", "label": "Frame generation", "group": "Smoothness",
       "help": "Makes frames between the game's own, for smoother motion, at a little input delay. Fast motion or camera cuts can show artifacts.",
       "choices": [

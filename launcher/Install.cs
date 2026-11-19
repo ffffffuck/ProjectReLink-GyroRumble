@@ -130,7 +130,6 @@ public partial class MainWindow
             if (c is { Ok: false })
                 texts.Children.Add(new TextBlock { Text = Why(c.Value.Text), FontSize = 12.5, Foreground = Res("Warn"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 3, 0, 0) });
             var chip = new TextBlock { Text = state, FontSize = 13, Foreground = Res(brush), VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(14, 2, 0, 0) };
-            if (c is { Ok: true }) chip.Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(0x8F, 0xD0, 0x9A));
             var grid = new Grid { ColumnDefinitions = { new ColumnDefinition(), new ColumnDefinition { Width = GridLength.Auto } } };
             Grid.SetColumn(chip, 1);
             grid.Children.Add(texts);
@@ -229,15 +228,16 @@ public partial class MainWindow
         {
             MainButtonText.Text = L("Mettre ReLink à jour", "Update ReLink");
             MainButton.IsEnabled = true;
-            MainNote.Text = L($"ReLink {latestTag} est sorti (celui-ci est le {mine}) : mettez-le à jour, puis installez le jeu.",
-                              $"ReLink {latestTag} is out (this one is {mine}): update it first, then install the game.");
+            Card(L("Installation", "Install"), L($"{latestTag} dispo", $"{latestTag} out"), Pill.Gold);
+            MainNote.Text = L("Mettez ReLink à jour avant d'installer.", "Update ReLink before installing.");
             return;
         }
+        Card(L("Installation", "Install"));
         MainButtonText.Text = Game.Installed(outPath) ? L("Réinstaller", "Install again") : L("Installer", "Install");
         MainButton.IsEnabled = SourceReady && outPath.Length > 2 && Tools.Find() != null;
-        MainNote.Text = Tools.Find() == null ? L("Les outils de ReLink manquent : voir à droite.", "ReLink's build tools are missing: see on the right.")
-            : SourceReady ? L("Tout est prêt. L'installation ne touche jamais à votre copie.", "Everything is ready. The install never changes your copy.")
-            : L("Choisissez d'abord votre copie du jeu, à droite.", "First choose your copy of the game, on the right.");
+        MainNote.Text = Tools.Find() == null ? L("Les outils de ReLink manquent.", "ReLink's build tools are missing.")
+            : SourceReady ? L("Tout est prêt.", "Everything is ready.")
+            : L("Choisissez votre copie du jeu.", "Choose your copy of the game.");
     }
 
     void Dropped(object sender, DragEventArgs e)
@@ -433,6 +433,7 @@ public partial class MainWindow
         runner.Line += l => Dispatcher.BeginInvoke(() => Line(l));
         runner.Finished += failure => Dispatcher.BeginInvoke(() => Ended(failure));
         runner.Start();
+        UpdateSide();   // (now that it runs: an update or a build again lets Home, Options and Mods be looked at)
     }
 
     static readonly Regex FilesLine = new(@"^(\d+) files, "), FileLine = new(@"^\s+\S+\s+\d+ MB\s+\d+s");
@@ -554,12 +555,12 @@ public partial class MainWindow
             foreach (var r in rows.Values) r.Done();
             foreach (var n in staff.Notes) n.Done();
             SetProgress(1);
-            ShowReady(preview: false);
+            Built();
             return;
         }
         if (failure == "cancelled")
         {
-            if (updating && Game.Installed(outPath)) ShowHome();
+            if (updating && Game.Installed(outPath)) { ShowHome(); CheckLatest(); }
             else ShowInstall();
             return;
         }
@@ -591,71 +592,54 @@ public partial class MainWindow
         runner?.Cancel();
     }
 
-    // ================= 3: the game is ready =================
+    // ================= 3: the game is ready: Home, with the first start's line in the sky =================
+    // (the screen that said "ready" said again what Home says; its switches and the space ReLink keeps are in Options, Game)
 
     CheckBox DesktopTick = null!, StartTick = null!;
     TextBlock StorageNote = null!;
     Button FreeLink = null!;
     Border StorageRow = null!;
+    bool justBuilt;   // (the sky says what the first start does, until it is made)
 
-    void BuildReadyRows()
+    /// Options, Game: the shortcuts as they are, and what ReLink keeps on the PC (once a build has measured it)
+    void BuildShortcutRows()
     {
-        SwitchRow(ReadyRows, L("Raccourci sur le bureau", "Desktop shortcut"), null, out DesktopTick, out _);
-        SwitchRow(ReadyRows, L("Entrée dans le menu Démarrer", "Start menu entry"), null, out StartTick, out _);
-        DesktopTick.IsChecked = StartTick.IsChecked = true;
+        SwitchRow(RowsGame, L("Raccourci sur le bureau", "Desktop shortcut"), null, out DesktopTick, out _);
+        SwitchRow(RowsGame, L("Entrée dans le menu Démarrer", "Start menu entry"), null, out StartTick, out _);
+        DesktopTick.IsChecked = File.Exists(Finder.DesktopLink);
+        StartTick.IsChecked = File.Exists(Finder.StartLink);
         DesktopTick.Click += ShortcutsChanged;
         StartTick.Click += ShortcutsChanged;
         StorageNote = new TextBlock { Style = St("RowHint"), Margin = new Thickness(0) };
         FreeLink = new Button { Style = St("Link"), HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 8, 0, 0) };
         FreeLink.Click += FreeSpace;
         StorageRow = new Border { Style = St("Row"), Child = new StackPanel { Children = { StorageNote, FreeLink } }, Visibility = Visibility.Collapsed };
-        ReadyRows.Children.Add(StorageRow);
-        ReadyRows.Children.Add(new TextBlock
-        {
-            Text = L("Le premier lancement est long, une seule fois (environ un quart d’heure sur un PC moyen) : le jeu se prépare pour votre carte graphique, avec un écran de chargement.",
-                     "The first start is long, once (about a quarter of an hour on a mid-range PC): the game gets ready for your graphics card, with a loading screen."),
-            Style = St("Body"), Margin = new Thickness(0, 16, 0, 0),
-        });
+        RowsGame.Children.Add(StorageRow);
     }
 
-    void ShowReady(bool preview)
+    /// The build done: the shortcuts (made at the first install, made again at an update), the folder the launcher's, Home
+    void Built()
     {
-        var time = elapsed.Elapsed;
-        ReadyTitle.Text = updating ? L("Le jeu est à jour", "Your game is updated") : L("Le jeu est prêt", "Your game is ready");
-        var compiledNote = thisCompile > 0 ? L($" (dont {Lasted(TimeSpan.FromSeconds(thisCompile))} de compilation)", $" (compiled in {Lasted(TimeSpan.FromSeconds(thisCompile))})") : "";
-        ReadyNote.Text = preview ? L($"Installé en 31 minutes dans {finished}.", $"Installed in 31 minutes in {finished}.")
-            : updating ? L($"Mis à jour en {Lasted(time)}{compiledNote} dans {finished}.", $"Updated in {Lasted(time)}{compiledNote} in {finished}.")
-            : L($"Installé en {Lasted(time)}{compiledNote} dans {finished}.", $"Installed in {Lasted(time)}{compiledNote} in {finished}.");
-        if (!preview)
+        if (!updating)
         {
-            if (!updating) Finder.Shortcuts(finished, DesktopTick.IsChecked == true, StartTick.IsChecked == true);
-            else
-            {   // (the ones the player has, made again; the switches say which there are)
-                DesktopTick.IsChecked = File.Exists(Finder.DesktopLink);
-                StartTick.IsChecked = File.Exists(Finder.StartLink);
-                Finder.RefreshShortcuts(finished);
-            }
-            if (Finder.ShortcutError != null) AddLog("shortcut not made: " + Finder.ShortcutError);
-            // the game folder is the launcher's from now on: its settings page reads and writes it
-            s.Folder = finished;
-            try { s.LoadGame(); s.Save(); } catch (Exception) { }
-            ShowSettings();
-            _ = FreeAfterBuild();
+            Finder.Shortcuts(finished, true, true);
+            DesktopTick.IsChecked = StartTick.IsChecked = true;
         }
-        Show(View.Ready);
-        MainButton.IsEnabled = preview || Game.Installed(finished);
-        MainNote.Text = PlaySummary();
+        else Finder.RefreshShortcuts(finished);
+        if (Finder.ShortcutError != null) AddLog("shortcut not made: " + Finder.ShortcutError);
+        // the game folder is the launcher's from now on: its settings page reads and writes it
+        s.Folder = finished;
+        try { s.LoadGame(); s.Save(); } catch (Exception) { }
+        _ = FreeAfterBuild();
+        justBuilt = true;
+        NavHome.IsChecked = true;
+        ShowHome();
+        CheckLatest();
     }
 
     void ShortcutsChanged(object sender, RoutedEventArgs e)
     {
-        if (finished.Length > 0) Finder.Shortcuts(finished, DesktopTick.IsChecked == true, StartTick.IsChecked == true);
-    }
-
-    void ReadyToHome(object sender, RoutedEventArgs e)
-    {
-        ShowHome();
-        CheckLatest();
+        if (s.Folder.Length > 0) Finder.Shortcuts(s.Folder, DesktopTick.IsChecked == true, StartTick.IsChecked == true);
     }
 
     /// What ReLink keeps on the PC, said once the game is ready, with the way to let it go
@@ -727,7 +711,8 @@ public partial class MainWindow
             ProblemHead.Text = L("Ce qui s'est passé", "What went wrong");
             ProblemText.Text = why;
         }
-        RepairLink.Visibility = tools ? Visibility.Visible : Visibility.Collapsed;
+        repairable = tools;   // (Repair is the card's button: Sidebar.cs)
+        RepairLink.Visibility = Visibility.Collapsed;
         DetailsLink.Content = L("Afficher les détails", "Show details");
         CopyLink.Content = L("Copier pour un rapport", "Copy for a report");
         Show(View.Problem);

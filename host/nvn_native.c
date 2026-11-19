@@ -689,6 +689,31 @@ NV(nvnTextureInitialize) {
     OLOG("texture %ux%ux%u levels %u format %#x target %d flags %#x at %#llx size %#llx", o->d.width, o->d.height,
          o->d.depth, o->d.levels, o->d.format, o->d.target, o->d.flags, (unsigned long long)o->gpu,
          (unsigned long long)o->L.size);
+    {   /* (relink, RX_NVN_LOG_SQUARE=1, diagnostic) square textures whose side is not a multiple of 64 (per-object shadow maps
+           whose size follows the camera: a new image nearly every frame): the first 60 with the guest's return addresses
+           (the frame records from x29), then every 600 of them how many and how many distinct sides */
+        static int on = -1;
+        if (on < 0) on = getenv("RX_NVN_LOG_SQUARE") != NULL;
+        if (on && o->d.width == o->d.height && o->d.width >= 128 && o->d.width <= 4096 && (o->d.width & 63)) {
+            static volatile LONG n;
+            static uint8_t seen[4097];
+            static int distinct;
+            const LONG k = InterlockedIncrement(&n);
+            if (!seen[o->d.width]) seen[o->d.width] = 1, distinct++;
+            if (k <= 60) {
+                uint64_t fp = c->x[29], ra[6] = {0};
+                for (int i = 0; i < 6 && fp > 0x10000 && fp < VBASE && !(fp & 7); i++) {
+                    ra[i] = G64(fp + 8);
+                    fp = G64(fp);
+                }
+                hos_log("nvn: square texture %u format %#x flags %#x: lr %#llx < %#llx < %#llx < %#llx < %#llx < %#llx < %#llx",
+                        o->d.width, o->d.format, o->d.flags, (unsigned long long)c->x[30], (unsigned long long)ra[0],
+                        (unsigned long long)ra[1], (unsigned long long)ra[2], (unsigned long long)ra[3],
+                        (unsigned long long)ra[4], (unsigned long long)ra[5]);
+            }
+            if (k % 600 == 0) hos_log("nvn: square textures of odd sides: %ld made, %d distinct sides so far", (long)k, distinct);
+        }
+    }
     RET(1);
 }
 NV(nvnTextureFinalize) {

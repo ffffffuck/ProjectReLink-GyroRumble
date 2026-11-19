@@ -16,7 +16,7 @@ namespace ReLink;
 /// the install and the update; Home.cs: the settings and the game itself).
 public partial class MainWindow : Window
 {
-    enum View { Install, Build, Ready, Problem, Home }
+    enum View { Install, Build, Problem, Home }
 
     Settings s = new();
     readonly Staff staff;
@@ -41,14 +41,15 @@ public partial class MainWindow : Window
             ShowActivated = false;
         }
         staff = new Staff(StaffCanvas);
-        Scene.Draw(Sky, 1120, 700, Scene.Hour());
-        skyTimer.Tick += (_, _) => Scene.Draw(Sky, 1120, 700, Scene.Hour());
+        Scene.Draw(Sky, Sky.Width, Sky.Height, Scene.Hour());
+        skyTimer.Tick += (_, _) => Scene.Draw(Sky, Sky.Width, Sky.Height, Scene.Hour());
         skyTimer.Start();
         clock.Tick += (_, _) => Tick();
         padTimer.Tick += (_, _) => UpdatePads();
         ApplyTexts();
+        WatchNote();
         BuildHomeRows();
-        BuildReadyRows();
+        HomeView.PreviewKeyDown += OptionsKey;   // (the options as the in-game menu: the arrows, Q and E)
         // (the window has no title bar: it moves by any place that is not a control)
         MouseLeftButtonDown += (_, e) =>
         {
@@ -71,13 +72,21 @@ public partial class MainWindow : Window
 
     void ApplyTexts()
     {
-        Subtitle.Text = L("Ocarina of Time, recompilé pour votre PC", "Ocarina of Time, recompiled for your PC");
-        HelpLink.Content = L("Aide", "Help");
-        FolderLink.Content = L("Dossier du jeu", "Game folder");
-        DiscordLink.Content = "Discord";
-        DiscordLink.ToolTip = new ToolTip { Style = St("Tip"), Content = L($"Rejoindre le serveur Discord de {Texts.Name}", $"Join the {Texts.Name} Discord server") };
-        UpdateLink.Content = L("Mettre à jour", "Update");
-        RebuildLink.Content = L("Reconstruire", "Build again");
+        HeroSub.Text = L("recompilé pour votre PC", "recompiled for your PC");
+        SidebarTexts();
+        LooksHead.Text = L("L'image", "How it looks");
+        MovesHead.Text = L("La fluidité", "How it moves");
+        LooksMore.Text = MovesMore.Text = L("Changer ›", "Change ›");
+        ModsHead.Text = "Mods";
+        ModsMore.Text = L("Gérer ›", "Manage ›");
+        NewsHead.Text = L("Nouveautés", "What's new");
+        NewsMore.Text = L("Lire les notes ›", "Read the notes ›");
+        HeroPlayText.Text = L("Jouer", "Play");
+        ModsTitle.Text = "Mods";
+        ModsIntro.Text = L("Les mods du dossier mods du jeu. Les mods romfs (textures, modèles, sons, textes) comptent dès le prochain lancement ; les mods exefs (patchs de code) demandent de reconstruire le jeu.",
+                           "The mods in the game folder's mods. RomFS mods (textures, models, sounds, text) count from the next start; exefs mods (code patches) need the game built again.");
+        ModsOpenFolder.Content = L("Ouvrir le dossier mods", "Open the mods folder");
+        ModsRebuild.Content = L("Reconstruire avec les patchs de code", "Build again with the code patches");
 
         InstallTitle.Text = L("Installer le jeu", "Install the game");
         InstallSub.Text = L("ReLink fabrique le jeu sur ce PC à partir de votre propre copie. Il faut le jeu avec sa mise à jour v131072 (build e0f3ccfa) : les autres versions ne fonctionnent pas. Cela se fait une fois et prend de 10 à 45 minutes.",
@@ -90,7 +99,6 @@ public partial class MainWindow : Window
 
         LogLink.Content = L("Afficher les détails", "Show details");
         CancelLink.Content = L("Annuler", "Cancel");
-        ReadySettings.Content = L("Régler le jeu", "Set up the game");
         BackLink.Content = L("Retour", "Back");
         RepairLink.Content = L("Réparer", "Repair");
         DetailsLink.Content = L("Afficher les détails", "Show details");
@@ -100,7 +108,7 @@ public partial class MainWindow : Window
         TabSmooth.Content = L("Fluidité", "Smoothness");
         TabGame.Content = L("Jeu", "Game");
         TabControls.Content = L("Contrôles", "Controls");
-        HomeFoot.Text = L("Le menu en jeu (Inser ou F1) change aussi ces réglages.", "The in-game menu (Insert or F1) changes these settings too.");
+        HomeFoot.Text = HeroFoot.Text = L("Le menu en jeu (Inser ou F1) change aussi ces réglages.", "The in-game menu (Insert or F1) changes these settings too.");
 
         PlayingTitle.Text = L("Bonne partie", "Enjoy the game");
         RestoreNow.Content = L("Remettre la fréquence de l'écran maintenant", "Put the display's refresh rate back now");
@@ -168,29 +176,65 @@ public partial class MainWindow : Window
         view = v;
         var pages = new (View Is, FrameworkElement Page)[]
         {
-            (View.Install, InstallView), (View.Build, BuildView), (View.Ready, ReadyView), (View.Problem, ProblemView), (View.Home, HomeView),
+            (View.Install, InstallView), (View.Build, BuildView), (View.Problem, ProblemView),
         };
         foreach (var (k, page) in pages)
         {
             page.Visibility = k == v ? Visibility.Visible : Visibility.Collapsed;
-            if (k != v || snapshot) continue;
-            page.Opacity = 0;
-            page.BeginAnimation(OpacityProperty, new DoubleAnimation(1, TimeSpan.FromMilliseconds(220)));
+            if (k == v) Appear(page);
         }
-        // the left column says the same thing as the page: a button when there is something to press, the percentage while it works
+        // (Home shows one of its pages: Home itself when coming back from the install, the build or a problem)
+        if (v == View.Home && NavHome.IsChecked != true && NavOptions.IsChecked != true && NavMods.IsChecked != true) NavHome.IsChecked = true;
+        ShowHomePage();
         ProgressBlock.Visibility = v == View.Build ? Visibility.Visible : Visibility.Collapsed;
-        MainButton.Visibility = v is View.Install or View.Ready or View.Home ? Visibility.Visible : Visibility.Collapsed;
-        MainNote.Visibility = MainButton.Visibility;
-        StatusRow.Visibility = v == View.Home ? Visibility.Visible : Visibility.Collapsed;
-        if (v != View.Home) ModsRow.Visibility = Visibility.Collapsed;
-        FolderLink.Visibility = v is View.Ready or View.Home ? Visibility.Visible : Visibility.Collapsed;
-        if (v is View.Ready or View.Home) MainButtonText.Text = L("Jouer", "Play");
+        UpdateSide();   // (Sidebar.cs: the side for this page)
     }
+
+    void Appear(FrameworkElement page)
+    {
+        if (snapshot) return;
+        page.Opacity = 0;
+        page.BeginAnimation(OpacityProperty, new DoubleAnimation(1, TimeSpan.FromMilliseconds(220)));
+    }
+
+    /// Home's two pages, as the side's choice says: the sky and what Play will do, or the options
+    void ShowHomePage()
+    {
+        var home = view == View.Home;
+        var hero = home && NavHome.IsChecked == true;
+        var options = home && NavOptions.IsChecked == true;
+        var mods = home && NavMods.IsChecked == true;
+        if (hero && HeroView.Visibility != Visibility.Visible) Appear(HeroView);
+        if (options && HomeView.Visibility != Visibility.Visible) Appear(HomeView);
+        if (mods && ModsView.Visibility != Visibility.Visible) { ShowModsPage(); Appear(ModsView); }
+        HeroView.Visibility = hero ? Visibility.Visible : Visibility.Collapsed;
+        HomeView.Visibility = options ? Visibility.Visible : Visibility.Collapsed;
+        ModsView.Visibility = mods ? Visibility.Visible : Visibility.Collapsed;
+        // (Home's Play is in the sky: the card's goes there; on the options and the mods it stays at hand)
+        if (home) UpdateSide();
+    }
+
+    void NavChanged(object sender, RoutedEventArgs e)
+    {
+        if (HeroView == null) return;   // (the first one is checked while the window is still being made)
+        if (view == View.Build && CanBrowse && sender is RadioButton { IsChecked: true }) { Show(View.Home); return; }   // (looking around while it builds)
+        if (BackToHome && sender is RadioButton { IsChecked: true }) { ShowHome(); CheckLatest(); return; }   // (out of "Install again")
+        ShowHomePage();
+        if (NavOptions.IsChecked == true) Dispatcher.BeginInvoke(FocusSelectedRow, DispatcherPriority.Input);
+    }
+
+    /// The cards of Home: each opens the options at its page
+    /// (on the press, and kept from the window: a press anywhere else that is not a control moves the window, DragMove, which
+    /// takes the mouse and the release with it)
+    void LooksClick(object sender, MouseButtonEventArgs e) { e.Handled = true; TabDisplay.IsChecked = true; NavOptions.IsChecked = true; }
+    void MovesClick(object sender, MouseButtonEventArgs e) { e.Handled = true; TabSmooth.IsChecked = true; NavOptions.IsChecked = true; }
 
     void MainClick(object sender, RoutedEventArgs e)
     {
         if (view == View.Install) StartInstall();
-        else if (view is View.Ready or View.Home) Play();
+        else if (view == View.Problem && repairable) Repair(sender, e);
+        else if (Browsing) Show(View.Build);   // (Home looked at while the game builds: back to the progress)
+        else if (view == View.Home) Play();
     }
 
     void TabChanged(object sender, RoutedEventArgs e)
@@ -198,6 +242,8 @@ public partial class MainWindow : Window
         if (PageDisplay == null) return;   // (the first tab is checked while the window is still being made)
         foreach (var (tab, page) in new[] { (TabDisplay, PageDisplay), (TabSmooth, PageSmooth), (TabGame, PageGame), (TabControls, PageControls) })
             page.Visibility = tab.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        ShowRowHelp();
+        if (HomeView.IsVisible) Dispatcher.BeginInvoke(FocusSelectedRow, DispatcherPriority.Input);
     }
 
     // ================= links =================
@@ -213,7 +259,7 @@ public partial class MainWindow : Window
 
     void OpenGameFolder(object sender, RoutedEventArgs e)
     {
-        var folder = view == View.Ready && finished.Length > 0 ? finished : s.Folder;
+        var folder = s.Folder;
         if (folder != "" && Directory.Exists(folder)) Open(folder);
     }
 
@@ -258,7 +304,7 @@ public partial class MainWindow : Window
     }
 
     // ================= pictures of the window, for checking it (nothing is run) =================
-    //   ReLink.exe --snapshot out.png --view install|build|update|ready|problem|home|home-update|home-mods|smooth|game|controls|playing
+    //   ReLink.exe --snapshot out.png --view install|build|update|ready|problem|home|home-update|home-mods|home-building|mods|options|smooth|game|controls|playing
 
     void Preview(string what)
     {
@@ -299,7 +345,9 @@ public partial class MainWindow : Window
                 foreach (var id in new[] { "read", "lift", "compile", "finish" }) Stage(id);
                 finished = outPath;
                 elapsed.Restart();
-                ShowReady(preview: true);
+                justBuilt = true;
+                ShowHome();
+                ShowVersion("v0.7.0", "v0.7.0", true, true);
                 break;
             case "problem":
                 MakeRows(update: false);
@@ -313,13 +361,16 @@ public partial class MainWindow : Window
                 break;
             default:
                 ShowHome();
-                StatusText.Text = L("Version v0.6.1, à jour.", "Version v0.6.1, up to date.");
-                if (what == "home-update")
+                ShowVersion("v0.6.1", what == "home-update" ? "v0.7.0" : "v0.6.1", true, true);
+                if (what == "mods") { NavMods.IsChecked = true; ShowModsPage(preview: true); }
+                if (what == "home-building")
                 {
-                    StatusText.Text = L("Version v0.6.1. La v0.7.0 est disponible.", "Version v0.6.1. v0.7.0 is available.");
-                    UpdateLink.Visibility = Visibility.Visible;
+                    outPath = s.Folder;
+                    updating = previewBuilding = true;
+                    Show(View.Home);
                 }
                 if (what == "home-mods") ShowMods(preview: 2);
+                if (what is "options" or "smooth" or "game" or "controls") NavOptions.IsChecked = true;
                 if (what == "smooth") TabSmooth.IsChecked = true;
                 else if (what == "game") TabGame.IsChecked = true;
                 else if (what == "controls") TabControls.IsChecked = true;

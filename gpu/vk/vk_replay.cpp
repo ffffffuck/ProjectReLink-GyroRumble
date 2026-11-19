@@ -34,6 +34,7 @@
 #include "vk_dump.h"
 #include "vk_gprof.h"
 #include "vk_framegen.h"
+#include "hdr_out.h"   // (relink: the F12 screenshot of an HDR picture)
 #include "vk_menu.h"
 #include "oot_cheat_items.h"   // (relink: OOT_CHEAT_ITEM_BASE, OOT_CHEAT_AGE_ID: the item wheel's counts and pages)
 #include "oot_wheel_state.h"   // (relink: the Item wheel and Cycle items rows' option ids)
@@ -105,6 +106,25 @@ void tl_note_signal(uint64_t value) {
     std::lock_guard lk(tl_mu);
     tl_ring[tl_ring_n++ % 64] = {value, tl_now_us(), GetCurrentThreadId()};
 }
+} // namespace
+/// (relink, diagnostics, RX_VK_LOG_TLWAIT with RX_VK_LOG_CAPWAIT) the last signals at or under a value: for each, its value and
+/// how many ms ago its submit went to the queue; for take_capture's line about a wait that has just ended
+int vk_tl_recent(uint64_t upto, char* out, int size) {
+    int k = 0;
+    out[0] = 0;
+    if (!tl_log_on()) return 0;
+    std::lock_guard lk(tl_mu);
+    const int64_t now = tl_now_us();
+    const uint64_t n = tl_ring_n < 64 ? tl_ring_n : 64;
+    for (uint64_t i = n; i-- > 0 && k < size - 40;) {
+        const TlSignal& s = tl_ring[(tl_ring_n - 1 - i) % 64];
+        if (s.value ? s.value > upto + 7 || s.value + 9 < upto : now - s.at_us > 20000) continue;
+        k += snprintf(out + k, size - k, " %llu%s:-%.1f", (unsigned long long)(s.value % 1000), s.tid ? "" : "u",
+                      (now - s.at_us) / 1000.0);
+    }
+    return k;
+}
+namespace {
 // (relink, 13/11, MEASURED at Zora's Fountain, Link standing, 75 %: the game's main thread waits 6.2 ms a frame there for the
 // frame before's last submit (take_capture's late pages), which is in the queue 3 ms before the wait begins, 600 times of 600
 // (hs1936). It is the GPU's own time: 7.9 ms of wait and 52.8 fps at the native resolution (hs1945). What changed nothing,
@@ -660,6 +680,7 @@ void submit_recording(Recording& r, bool signal_value = true, uint64_t signal_at
     uint64_t seq = 0;
     if (rec_timeline) {   // (and its number on the recordings' timeline; every caller holds replay_mu: in order)
         seq = ++rec_seq;
+        memory_wb_seq_assign(seq);   // (relink, RX_VK_LATE_SEQ: the write-backs this recording holds)
         signals[nsig].semaphore = rec_timeline;
         signals[nsig].value = seq;
         signals[nsig].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -688,7 +709,14 @@ void submit_recording(Recording& r, bool signal_value = true, uint64_t signal_at
     }
     PROF(PROF_QSUBMIT);
     const VkResult res = vkQueueSubmit2(dev.queue, 1, &si, r.fence);
-    if (signal_value && tl_log_on()) tl_note_signal(signal.value);
+    if (tl_log_on()) {   // (every submit, for vk_tl_recent: one that signals nothing has tid 0, shown with a 'u')
+        if (signal_value) {
+            tl_note_signal(signal.value);
+        } else {
+            std::lock_guard tk(tl_mu);
+            tl_ring[tl_ring_n++ % 64] = {r.value, tl_now_us(), 0};
+        }
+    }
     r.submitted = res == VK_SUCCESS;
     static int failures;
     if (res != VK_SUCCESS && failures++ < 8) logf("vk: submit %llu failed (%d)", (unsigned long long)r.value, (int)res);
@@ -2554,6 +2582,22 @@ uint64_t get_replayed() {
 }
 /// (relink) Waits for the recording submission value f (or the recording of value f) was finished in, on the recordings'
 /// timeline: true when that recording is known (the result in *ok), false when it is not (f not finished yet)
+} // namespace
+uint64_t vk_rec_completed() {
+    uint64_t v = 0;
+    if (rec_timeline) vkGetSemaphoreCounterValue(dev.device, rec_timeline, &v);
+    return v;
+}
+bool vk_rec_wait(uint64_t seq, uint32_t ms) {
+    if (!rec_timeline || vk_rec_completed() >= seq) return true;
+    queue_flush_for(FR_VALUE);
+    VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+    wi.semaphoreCount = 1;
+    wi.pSemaphores = &rec_timeline;
+    wi.pValues = &seq;
+    return vkWaitSemaphores(dev.device, &wi, (uint64_t)ms * 1000000ull) == VK_SUCCESS;
+}
+namespace {
 bool wait_recorded(uint64_t f, uint64_t timeout_ns, int* ok) {
     if (!rec_timeline || per_queue_fences_off()) return false;
     uint64_t seq = 0;
@@ -2761,6 +2805,26 @@ void invalidate(uint64_t gpu, uint64_t size) {
         }
     }
     if (size && size <= 0x4000) memory_note_read_range(host->gpu_guest(gpu), size);   // (relink: for the compute capture, vk_memory.cpp)
+    {   // (relink, RX_VK_METER_HOLD=1) OoT's exposure sums read before a new result has landed are the zeros the
+        // game wrote after its last read: it is given the last result again
+        static const bool hold = fast_sync_part("RX_VK_METER_HOLD");
+        if (hold && size == 0x1040 && memory_is_meter(host->gpu_guest(gpu))) {
+            static std::mutex mu;
+            static std::unordered_map<uint64_t, std::array<uint32_t, 4>> last;
+            static std::atomic<int64_t> st_reads{0}, st_given{0};
+            std::array<uint32_t, 4> w{};
+            host->gpu_read(gpu, w.data(), 16);
+            std::lock_guard lk(mu);
+            if (w[0] | w[1] | w[2] | w[3]) {
+                last[gpu] = w;
+            } else if (auto it = last.find(gpu); it != last.end()) {
+                host->gpu_write(gpu, it->second.data(), 16);
+                st_given++;
+            }
+            if (++st_reads % 2000 == 0)
+                logf("vk: exposure sums: 2000 reads, %lld of them given the last result again (RX_VK_METER_HOLD)", (long long)st_given.exchange(0));
+        }
+    }
     if (size && size <= 0x4000 && !memory_readback_wait_on()) {
         static const bool pace_off = getenv("RX_VK_READBACK_PACE") == nullptr;
         static const uint64_t pace_ns = (uint64_t)(getenv("RX_VK_READBACK_PACE_MS") ? std::max(0, atoi(getenv("RX_VK_READBACK_PACE_MS"))) : 10) * 1000000ull;
@@ -3294,6 +3358,7 @@ struct ScreenShot {
     void* map = nullptr;
     uint32_t w = 0, h = 0;
     bool pending = false;
+    bool hdr = false;   // (relink: the picture's HDR10 words read as they are, made sRGB on the CPU: hdr_out.h)
     uint64_t value = 0;
 };
 ScreenShot screen_shot;
@@ -3304,6 +3369,7 @@ void screenshot_capture(VkCommandBuffer cmd, VkImage src, uint32_t sw, uint32_t 
         const size_t bytes = (size_t)s.w * s.h * 4;
         invalidate_mapped(s.buf_alloc, bytes);
         std::vector<uint8_t> px((const uint8_t*)s.map, (const uint8_t*)s.map + bytes);
+        if (s.hdr) hdr_out::hdr10_to_rgba8(px.data(), (size_t)s.w * s.h, hdr_paper_white_nits());
         menu_store_screenshot(std::move(px), s.w, s.h);
         destroy_image(s.image, s.image_alloc);
         destroy_buffer(s.buf, s.buf_alloc);
@@ -3315,7 +3381,8 @@ void screenshot_capture(VkCommandBuffer cmd, VkImage src, uint32_t sw, uint32_t 
     s.w = cropped ? (uint32_t)crop[2] : sw, s.h = cropped ? (uint32_t)crop[3] : sh;
     VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ci.imageType = VK_IMAGE_TYPE_2D;
-    ci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    s.hdr = hdr_output();   // (relink: the game's window textures hold PQ then: kept 10-bit, not truncated by the blit)
+    ci.format = s.hdr ? VK_FORMAT_A2B10G10R10_UNORM_PACK32 : VK_FORMAT_R8G8B8A8_UNORM;
     ci.extent = {s.w, s.h, 1};
     ci.mipLevels = ci.arrayLayers = 1;
     ci.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -4741,6 +4808,10 @@ void fill_replay_table(MkwVkRenderer& t) {
         if (id == HOS_OPT_TELEPORT_PICTURES) return menu_teleport_captures_on();   // (relink: host/hos_main.c oot_capture_tick)
         if (id == HOS_OPT_LOW_CAP_MFPS) return low_cap_repeats() > 1 ? low_cap_mfps.load(std::memory_order_relaxed) : 0;
         if (id == HOS_OPT_FOV) return opts.fov;   // (relink: host/nn_vi.c, nx2/oot_fov.py)
+        if (id == HOS_OPT_HDR) return hdr_output() ? 1 : 0;   // (relink: host/nn_vi.c QueryDisplayHdrStatus)
+        if (id == HOS_OPT_HDR_PEAK) return hdr_peak_nits();
+        if (id == HOS_OPT_HDR_PAPER_WHITE) return hdr_paper_white_nits();
+        if (id == HOS_OPT_KEY_FULLSCREEN) return hotkey_vk(opts.key_full);   // (relink: host/display.c)
         if (id == HOS_OPT_VOLUME) return opts.volume;   // (relink: host/nn_audio.c)
         if (id == HOS_OPT_PRESENTS_SHOWN) return presents_shown.load(std::memory_order_acquire) & 0x3fffffff;   // (relink: host/nn_vi.c)
         return id == 0 ? opts.realtime : id == 1 ? menu_is_open() : id == 2 ? resolution_auto() && !dlss_full_scale() : id == 3 ? (dlss_full_scale() ? 10000 : resolution_scale()) : id == 4 ? opts.pad_background : id == 5 ? opts.text_speed : id == 6 ? opts.mouse_native :

@@ -41,6 +41,7 @@
 #include "oot_tp_places.h"   // (relink: the Travel page's places)
 #include "prompt_tex.h"   // (relink: the HUD cross's letters follow the button font)
 #include "vk_screenshot.h"   // (relink: F12)
+#include "hdr_out.h"   // (relink: the bitmaps in HDR10 when the window is)
 #include "vk_startup_paint.h"
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
 #include "vk_dlss.h"
@@ -75,7 +76,7 @@ struct Row {
     const char* help;   // (shown under the list while the row is selected: what the row is, the same whatever its value)
     // (a line about the value chosen, under the help, or nullptr: hint(v, -1) is the one to show now for v, hint(v, 0),
     // hint(v, 1), ... every one v can have (those that depend on the other rows or on the GPU), until nullptr, so the
-    // menu keeps the height of the tallest: measure_help)
+    // menu keeps the height of the tallest: opt_help_most)
     const char* (*hint)(int v, int variant) = nullptr;
     bool restart = false;   // (read once, at the start: a change applies after a restart)
     bool preset_exempt = false;   // (a change here leaves the Quality preset alone: the controls, the window, the counter)
@@ -348,7 +349,7 @@ const char* tx_gpu(int v) {
     if (v <= 0) snprintf(buf, sizeof buf, "Auto");
     else if (idx < (int)gpu_device_names.size()) snprintf(buf, sizeof buf, "%d: %s", idx, gpu_device_names[idx].c_str());
     else snprintf(buf, sizeof buf, "%d: Device %d", idx, idx);
-    // (the whole name shows: the selected row slides through it, see marquee_pos)
+    // (a name too long for its row is cut short in it: paint_options)
     return buf;
 }
 const char* tx_pad_layout(int v);
@@ -466,6 +467,10 @@ const char* hn_framegen(int v, int variant) {
     return b[std::clamp(v, 2, 8)];
 }
 MENU_HINTS(hn_pace, 0, "As soon as it is ready.", "At an even interval: less stutter, at up to one frame of delay.")
+MENU_HINTS(hn_vsync, 0, "Each frame is shown as soon as it is ready: the least delay. Where the driver has no mailbox mode "
+           "(AMD's on Windows), a line can tear across the picture.",
+           "Each frame waits for the display's refresh: no tearing, a little more delay. Below the display's rate, a frame "
+           "now and then stays on for two refreshes.")
 MENU_HINTS(hn_output_res, 0, "The game's own size.",
            "The sharpest on a 2560x1440 screen: nothing to scale to the window.",
            "The sharpest on a 3840x2160 screen. The game's render targets get a bigger GPU pool, so a full-size 3D fits.",
@@ -529,6 +534,26 @@ MENU_HINTS(hn_button_prompts, 0, "The game's own: the Switch's letters.",
            "Cross, circle, square, triangle, L1, R1, L2, R2, Options and Create, drawn by ReLink, the faded letters around "
            "the HUD's action button too. The ocarina's notes keep the Switch's.")
 
+// (relink) The keys ReLink's own keyboard actions can take (Menu key, Screenshot key, Fullscreen key), by index: kept in
+// relink_options.ini as these indexes: the list must not change (None is its length). F1 opens the menu too while no other of these rows is F1 (keyboards without Insert)
+const int kHotkeys[] = {VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_INSERT, VK_PAUSE,
+                        VK_SCROLL};
+constexpr int kHotkeyNone = (int)(sizeof kHotkeys / sizeof kHotkeys[0]);
+const char* tx_hotkey(int v) {
+    if (v < 0 || v >= kHotkeyNone) return "None";
+    if (kHotkeys[v] == VK_INSERT) return "Insert";
+    if (kHotkeys[v] == VK_PAUSE) return "Pause";
+    if (kHotkeys[v] == VK_SCROLL) return "Scroll Lock";
+    static char b[8];
+    return snprintf(b, sizeof b, "F%d", kHotkeys[v] - VK_F1 + 1), b;
+}
+MENU_HINTS(hn_hotkey, 0, nullptr)
+
+// (relink) HDR: what On does, and what it does not when Windows' HDR is off (hdr_output then stays false: the picture is SDR)
+MENU_HINTS(hn_hdr, 0, "SDR, as before.",
+           "The game draws in HDR10 at the display's peak brightness; its interface at the paper white (hdr_paper_white in "
+           "relink_options.ini, 203 nits). With Windows' HDR off the picture stays SDR.")
+
 Row rows[] = {
     // Graphics (the DLSS model only in a build with DLSS: row_shown)
     {TAB_GRAPHICS, "Quality preset", &opts.preset, 0, 5, 1, tx_preset,
@@ -536,12 +561,17 @@ Row rows[] = {
      hn_preset},
     {TAB_GRAPHICS, "Fullscreen", &opts.fullscreen, 0, 1, 1, tx_onoff,
      "Fills the whole screen with the game, without the window's border. The same as F11.", nullptr, false, true},
+    {TAB_GRAPHICS, "HDR", &opts.hdr, 0, 1, 1, tx_onoff,
+     "The game's own HDR picture, as on an HDR TV. Needs Windows' HDR on for this display. Applies after a restart.", hn_hdr,
+     true, true},
     {TAB_GRAPHICS, "GPU device", &opts.gpu_device, 0, 8, 1, tx_gpu,
      "Which graphics card the game runs on. Applies after a restart.", hn_gpu, true, true},
     {TAB_GRAPHICS, "Frame generation", &opts.framegen, 0, 8, 1, tx_framegen,
      "Makes frames between the game's own, for smoother motion, at a little input delay. Fast motion or camera cuts can "
      "show artifacts.", hn_framegen},
     {TAB_GRAPHICS, "Frame pacing", &opts.pace, 0, 1, 1, tx_onoff, "When each frame is shown.", hn_pace},
+    {TAB_GRAPHICS, "V-Sync", &opts.vsync, 0, 1, 1, tx_onoff,   // (relink: vk_main.cpp make_swapchain)
+     "Shows each frame in step with the display's refresh, so the picture never tears. Applies at once.", hn_vsync, false, true},
     {TAB_GRAPHICS, "Low latency", &opts.reflex, 0, 2, 1, tx_reflex,
      "NVIDIA Reflex / AMD Anti-Lag 2: starts each frame as late as it can, for less input delay. Not used with frame generation.", hn_reflex},
     // (the picture's way, top to bottom: the output's size, what fills it from the 3D, the 3D's size, then the window)
@@ -586,6 +616,14 @@ Row rows[] = {
      "Hold R or L for a wheel of your items: point at one with either stick and let go to equip it.", hn_item_wheel},
     {TAB_GAMEPLAY, "Cycle items", &opts.cycle_items, 0, 4, 1, tx_cycle_items,
      "Changes the item on ZR with a tap of R or L, within its group. Holding R or L still opens the row.", hn_cycle_items},
+    // (relink) the keyboard's own keys of ReLink: kHotkeys
+    {TAB_GAMEPLAY, "Menu key", &opts.key_menu, 0, kHotkeyNone - 1, 1, tx_hotkey,
+     "The key that opens and closes this menu. A controller's Home button, or Select and Start together, opens it too.",
+     hn_hotkey, false, true},
+    {TAB_GAMEPLAY, "Screenshot key", &opts.key_shot, 0, kHotkeyNone, 1, tx_hotkey,
+     "Saves a picture of the game, without this menu, in the game folder's screenshots folder.", hn_hotkey, false, true},
+    {TAB_GAMEPLAY, "Fullscreen key", &opts.key_full, 0, kHotkeyNone, 1, tx_hotkey,
+     "Switches between the window and fullscreen. Alt+Enter does too.", hn_hotkey, false, true},
 
     // Controls (17 rows)
     {TAB_CONTROLS, "Controller in background", &opts.pad_background, 0, 1, 1, tx_onoff,
@@ -791,16 +829,51 @@ int tab_row_count(int t) {
     for (int i = 0; i < kRows; i++) if (rows[i].tab == (MenuTab)t && row_shown(i)) c++;
     return c;
 }
-/// The most rows a tab has: the menu keeps that height whichever tab is shown
-int max_tab_rows() {
-    int most = 0;
-    for (int t = 0; t < TAB_COUNT; t++) most = std::max(most, tab_row_count(t));
-    return most;
-}
 
+/// (relink) The small heading a row sits under on its tab, and that heading's place on the tab ("": the tab's first rows,
+/// with no heading). A tab shows its rows heading by heading, in the table's order within each
+const char* row_group(int i, int* place) {
+    static const struct { const char* name; const char* group; int place; } groups[] = {
+        {"Fullscreen", "DISPLAY", 1}, {"HDR", "DISPLAY", 1}, {"GPU device", "DISPLAY", 1}, {"Output resolution", "DISPLAY", 1},
+        {"Handheld profile", "DISPLAY", 1}, {"Ultrawide", "DISPLAY", 1}, {"Field of view", "DISPLAY", 1},
+        {"Upscaler", "UPSCALING", 2}, {"DLSS model", "UPSCALING", 2}, {"Render resolution", "UPSCALING", 2},
+        {"Window scaling filter", "UPSCALING", 2}, {"Sharpness", "UPSCALING", 2},
+        {"Frame generation", "SMOOTHNESS", 3}, {"Frame pacing", "SMOOTHNESS", 3}, {"V-Sync", "SMOOTHNESS", 3}, {"Low latency", "SMOOTHNESS", 3},
+        {"Robust buffers", "ADVANCED", 4},
+        {"Volume", "SOUND", 1}, {"Audio output", "SOUND", 1}, {"Microphone", "SOUND", 1},
+        {"Item wheel", "ITEMS", 2}, {"Cycle items", "ITEMS", 2},
+        {"Menu key", "KEYBOARD", 3}, {"Screenshot key", "KEYBOARD", 3}, {"Fullscreen key", "KEYBOARD", 3},
+        {"Quit game", "MORE", 4}, {"Cheats", "MORE", 4},
+        {"Controller in background", "PAD", 0}, {"Rumble strength", "PAD", 0}, {"Left stick dead zone", "PAD", 0},
+        {"Right stick dead zone", "PAD", 0}, {"Layout preset", "PAD", 0}, {"Button prompts", "PAD", 0}, {"Controls", "PAD", 0},
+        {"Mouse camera", "MOUSE", 1}, {"Mouse sensitivity", "MOUSE", 1}, {"Invert mouse vertical", "MOUSE", 1},
+        {"Invert camera X", "CAMERA", 2}, {"Invert camera Y", "CAMERA", 2},
+        {"Motion controls", "MOTION", 3}, {"Motion sensitivity X", "MOTION", 3}, {"Motion sensitivity Y", "MOTION", 3},
+        {"Invert motion X", "MOTION", 3}, {"Invert motion Y", "MOTION", 3},
+    };
+    for (const auto& g : groups)
+        if (!strcmp(g.name, rows[i].name)) return *place = g.place, g.group;
+    return *place = 0, "";
+}
+/// The rows in the order the tabs show them: by tab, then by heading, then as the table has them
+const int* display_order() {
+    static int order[kRows];
+    static const bool made = [] {
+        for (int i = 0; i < kRows; i++) order[i] = i;
+        std::stable_sort(order, order + kRows, [](int a, int b) {
+            int pa = 0, pb = 0;
+            row_group(a, &pa), row_group(b, &pb);
+            return rows[a].tab != rows[b].tab ? rows[a].tab < rows[b].tab : pa < pb;
+        });
+        return true;
+    }();
+    (void)made;
+    return order;
+}
 int tab_row_to_global(int t, int local_idx) {
     int count = 0;
-    for (int i = 0; i < kRows; i++) {
+    for (int k = 0; k < kRows; k++) {
+        const int i = display_order()[k];
         if (rows[i].tab == (MenuTab)t && row_shown(i)) {
             if (count == local_idx) return i;
             count++;
@@ -811,22 +884,11 @@ int tab_row_to_global(int t, int local_idx) {
 
 std::atomic<bool> open_now{false};
 bool menu_refresh = false;
-// (a value too long for its row, a GPU's name: the selected row's slides through it, a character a step, resting at
-// each end; the other rows end it with "...". paint_menu says how far it can slide, menu_tick moves it)
-int marquee_pos = 0, marquee_max = 0;
-int64_t marquee_next = 0;
-constexpr int64_t kMarqueeStep = 150000000LL, kMarqueeRest = 1200000000LL;   // (ns)
-// (relink) the mouse (menu_tick): the tab strip's part under the cursor (a tab 0 to 2, 3 the previous, 4 the next; -1
-// none); paint_menu's record of each shown row's value's left edge (as with its arrows, whether shown or not) and of the
-// rows a slider's track was drawn on; the slider held with the left button (its row in the tab, -1 none)
+// (relink) the mouse (menu_tick): the tab under the cursor (-1 none); the slider held with the left button (its row in
+// the tab, -1 none)
 int hover_tab = -1;
-int row_value_l[kRows];
-bool row_slider[kRows];
 int drag_row = -1;
 bool mouse_read = false;   // (the menu has read the mouse since it opened)
-// (the Cheats page's and the list pages' record of each shown row's or line's value's left edge: the menu's width, none)
-int cheat_value_l[kCheatRows];
-int list_value_l[kTeleportLines];
 bool is_slider(const Row& r) { return r.value == &opts.sharpness || r.value == &opts.mouse_sens || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.volume; }
 /// (a scale: the arrows, a click and the wheel stop at its ends; Rumble strength would go from Off to its strongest)
 bool stops_at_ends(const Row& r) { return r.value == &opts.mouse_sens || r.value == &opts.rumble || r.value == &opts.gyro_sens_x || r.value == &opts.gyro_sens_y || r.value == &opts.deadzone_l || r.value == &opts.deadzone_r || r.value == &opts.fov || r.value == &opts.volume; }
@@ -942,21 +1004,40 @@ void mic_chosen() {
     mic_tell_host();
 }
 void save() {
-    // (relink) the lines that are not the menu's are kept: the controls, pad_ and key_ (host/nn_hid.c)
+    // (relink) the lines that are not the menu's are kept: the controls, pad_ and key_ (host/nn_hid.c), and every other key
+    // this file holds without a row here, the launcher's frame_rate among them (Discord, 18/11: "Fps cap get reverted to 60
+    // every time I close the game": the game's save dropped it, and the launcher read the default back)
     std::string kept;
+    std::vector<std::pair<std::string, std::string>> others;   // (each key and its line: the last line of a key kept)
     if (FILE* f = fopen(ini_path().c_str(), "r")) {
-        char line[256];
-        while (fgets(line, sizeof line, f))
-            if (!strncmp(line, "pad_", 4) || !strncmp(line, "key_", 4)) kept += line;
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            if (!strncmp(line, "pad_", 4) || !strncmp(line, "key_", 4)) {
+                kept += line;
+                continue;
+            }
+            const char* eq = strchr(line, '=');
+            if (!eq || line[0] == '#') continue;
+            const std::string key(line, (size_t)(eq - line));
+            bool mine = key == "microphone_device" || key == "hdr_paper_white" || key == "options_version";
+            for (const Row& r : rows) mine |= r.value && key == ini_key(r);
+            if (mine) continue;
+            std::string text(line);
+            if (text.back() != '\n') text += '\n';
+            std::erase_if(others, [&](const auto& o) { return o.first == key; });
+            others.emplace_back(key, std::move(text));
+        }
         fclose(f);
     }
     if (FILE* f = fopen(ini_path().c_str(), "w")) {
         for (const Row& r : rows)
             if (r.value) fprintf(f, "%s=%d\n", ini_key(r), *r.value);
         if (!mic_want.empty()) fprintf(f, "microphone_device=%s\n", mic_want.c_str());   // (relink: also while it is unplugged)
+        fprintf(f, "hdr_paper_white=%d\n", opts.hdr_paper_white);   // (relink: HDR, no row of its own)
         // (2: game_speed below 2 was only ever the old default, see menu_init; 3: the mouse's buttons are bindings, see
         // host/nn_hid.c binds_load)
         fprintf(f, "options_version=3\n");
+        for (const auto& o : others) fputs(o.second.c_str(), f);
         if (!can_bind()) fputs(kept.c_str(), f);
         for (int i = 0; i < HOS_KEY_N && can_bind(); i++) {   // (the keys-only controls, HOS_KEY_*, have no pad_ line)
             if (i < HOS_SW_N) fprintf(f, "pad_%s=%d\n", bind_names[i], host->binding(HOS_BIND_PAD, i, 0));
@@ -1113,6 +1194,7 @@ struct Bitmap {
     std::vector<VkBufferImageCopy> runs;
 };
 Bitmap menu_bmp, fps_bmp, notice_bmp;   // (relink: notice_bmp, the Travel page's "picture saved" line)
+bool menu_keyed = true;   // (relink: every page of the menu is a cartridge, its round corners see-through)
 std::mutex bmp_mu;
 int scale_of(uint32_t h) { return std::max(1u, h / 720); }
 
@@ -1149,6 +1231,7 @@ void gdi_draw(Bitmap& out, uint32_t w, uint32_t h, void (*paint)(HDC, uint32_t, 
     }
     const bool rgba = dev.swap_format == VK_FORMAT_R8G8B8A8_UNORM || dev.swap_format == VK_FORMAT_R8G8B8A8_SRGB;
     std::lock_guard lk(bmp_mu);
+    if (&out == &menu_bmp) out.keyed = menu_keyed;   // (with its pixels, under the lock: menu_record reads both together)
     out.w = w, out.h = h;
     out.px.assign((const uint8_t*)bits, (const uint8_t*)bits + (size_t)w * h * 4);
     if (out.keyed) {
@@ -1173,9 +1256,13 @@ void gdi_draw(Bitmap& out, uint32_t w, uint32_t h, void (*paint)(HDC, uint32_t, 
             }
         }
     }
-    for (size_t i = 0; i < out.px.size(); i += 4) {
-        if (rgba) std::swap(out.px[i], out.px[i + 2]);
-        out.px[i + 3] = 255;
+    if (hdr_output()) {   // (relink) the window's images are HDR10 words: the bitmap as such, at the paper white (hdr_out.h)
+        hdr_out::bgra8_to_hdr10(out.px.data(), out.px.size() / 4, hdr_paper_white_nits());
+    } else {
+        for (size_t i = 0; i < out.px.size(); i += 4) {
+            if (rgba) std::swap(out.px[i], out.px[i + 2]);
+            out.px[i + 3] = 255;
+        }
     }
     out.version++;
     SelectObject(dc, old);
@@ -1183,11 +1270,12 @@ void gdi_draw(Bitmap& out, uint32_t w, uint32_t h, void (*paint)(HDC, uint32_t, 
     DeleteDC(dc);
 }
 HFONT font(int px, int weight) {
-    return CreateFontA(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                       DEFAULT_PITCH, "Segoe UI");
+    // (relink) the game's own typeface where it is (vk_startup_paint.h startup_fonts): semibold as Rubik Medium, bold as Rubik's
+    const bool own = startup_fonts();
+    const char* name = !own ? "Segoe UI" : weight >= FW_BOLD ? "Rubik" : weight >= FW_SEMIBOLD ? "Rubik Medium" : "Rubik";
+    return CreateFontA(-px, 0, 0, 0, own ? (weight >= FW_BOLD ? FW_BOLD : FW_NORMAL) : weight, 0, 0, 0, DEFAULT_CHARSET,
+                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, name);
 }
-int help_px = 0;   // (the help text's height: measure_help)
-constexpr int kHintGap = 4, kHintIndent = 10;   // (the value's line: below the row's help, in from its bar)
 /// The help text word-wrapped to width, a TextOutA a line (the POSIX GDI stand-in has no DrawTextA), drawn at (x, y)
 /// when draw: its height in pixels either way
 int wrap_help(HDC dc, const char* text, int width, int x, int y, bool draw) {
@@ -1216,6 +1304,77 @@ void fill(HDC dc, int x, int y, int w, int h, COLORREF c) {
     HBRUSH b = CreateSolidBrush(c);
     FillRect(dc, &r, b);
     DeleteObject(b);
+}
+
+namespace cart {
+constexpr COLORREF kShell = RGB(0xB9, 0xB4, 0xAA), kGroove = RGB(0xA3, 0x9E, 0x93), kLabel = RGB(0xEC, 0xE6, 0xD8),
+                   kInk = RGB(0x2A, 0x27, 0x24), kSoft = RGB(0x6B, 0x65, 0x5C), kFaint = RGB(0x8A, 0x83, 0x76),
+                   kRule = RGB(0xE2, 0xDB, 0xCB), kOff = RGB(0xCF, 0xC7, 0xB6), kTrack = RGB(0xD6, 0xCD, 0xB9),
+                   kHelp = RGB(0x4A, 0x45, 0x3E), kTagInk = RGB(0x8A, 0x6A, 0x10), kTag = RGB(0xF3, 0xE3, 0xB5),
+                   kYellow = RGB(0xD4, 0xA5, 0x32), kBlue = RGB(0x3F, 0x5F, 0xB0), kGreen = RGB(0x3E, 0x8A, 0x4E);
+struct TabLook { COLORREF strip, on, tint, edge; };
+// (a tab's strip, the text on it, the selected row's tint and that row's edge: the strip half over the tint)
+constexpr TabLook kTabs[3] = {{RGB(0xC0, 0x47, 0x3D), RGB(255, 255, 255), RGB(0xF2, 0xD6, 0xD0), RGB(0xD9, 0x8E, 0x86)},
+                              {RGB(0x3E, 0x8A, 0x4E), RGB(255, 255, 255), RGB(0xD3, 0xE6, 0xD2), RGB(0x88, 0xB8, 0x90)},
+                              {RGB(0x3F, 0x5F, 0xB0), RGB(255, 255, 255), RGB(0xD5, 0xDC, 0xEF), RGB(0x8A, 0x9D, 0xD0)}};
+COLORREF mix(COLORREF a, COLORREF b, float t) {
+    const auto ch = [t](int x, int y) { return (int)std::lround(x + (y - x) * t); };
+    return RGB(ch(GetRValue(a), GetRValue(b)), ch(GetGValue(a), GetGValue(b)), ch(GetBValue(a), GetBValue(b)));
+}
+/// The game's typeface at px pixels: 0 regular, 1 medium, 2 bold, 3 extra bold
+HFONT face(float px, int weight) {
+    const bool own = startup_fonts();
+    const char* name = !own ? "Segoe UI" : weight == 1 ? "Rubik Medium" : weight == 3 ? "Rubik ExtraBold" : "Rubik";
+    const int w = own ? (weight == 2 ? FW_BOLD : FW_NORMAL) : weight == 0 ? FW_NORMAL : weight == 1 ? FW_MEDIUM : FW_BOLD;
+    return CreateFontA(-std::max(6, (int)std::lround(px)), 0, 0, 0, w, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                       CLEARTYPE_QUALITY, DEFAULT_PITCH, name);
+}
+int text_w(HDC dc, const std::string& t) {
+    SIZE sz{};
+    GetTextExtentPoint32A(dc, t.c_str(), (int)t.size(), &sz);
+    return (int)sz.cx;
+}
+int text_h(HDC dc) {
+    SIZE sz{};
+    GetTextExtentPoint32A(dc, "Ag", 2, &sz);
+    return (int)sz.cy;
+}
+/// A triangle pointing left (dir -1), right (1) or up (0), centred on (cx, cy), size pixels across, row by row
+void triangle(HDC dc, int cx, int cy, int size, int dir, COLORREF c) {
+    const int half = std::max(1, size / 2);
+    for (int i = -half; i <= half; i++) {
+        const int len = half - std::abs(i);   // (left and right: rows from the tip; up: rows growing to the base)
+        if (dir == 0) startup_gdi::fill(dc, cx - (i + half) / 2, cy - half / 2 + (i + half) * 3 / 4, i + half + 1, 1, c);
+        else if (dir > 0) startup_gdi::fill(dc, cx - half / 2, cy + i, len + 1, 1, c);
+        else startup_gdi::fill(dc, cx + half / 2 - len, cy + i, len + 1, 1, c);
+    }
+}
+} // namespace cart
+
+/// (relink) The menu's pages other than the options in the same cartridge: the shell, its grooves and the cream label over
+/// the whole bitmap (round corners see-through: menu_bmp is keyed), and the page's title on a strip of its colour at the
+/// label's top left. The pages keep their own layout under it (vk_menu_hit.h): the strip stays above 38 * s
+void cart_page(HDC dc, int w, int h, int s, const char* title, COLORREF strip, COLORREF on) {
+    using namespace cart;
+    startup_gdi::fill(dc, 0, 0, w, h, RGB(0, 0, 0));
+    startup_gdi::round_rect(dc, 0, 0, w, h, 10 * s, kShell);
+    for (int x = 40 * s; x + 3 * s < w - 40 * s; x += 9 * s) startup_gdi::fill(dc, x, 2 * s, 2 * s, 3 * s, kGroove);
+    startup_gdi::round_rect(dc, 5 * s, 7 * s, w - 10 * s, h - 12 * s, 7 * s, kLabel);
+    HFONT f = face(17.0f * (float)s, 3);
+    HGDIOBJ old = SelectObject(dc, f);
+    const int tw = text_w(dc, title) + 28 * s;
+    startup_gdi::round_rect(dc, 5 * s, 7 * s, tw, 31 * s + 7 * s, 7 * s, strip);
+    startup_gdi::fill(dc, 5 * s, 38 * s, tw, 7 * s, kLabel);   // (the strip's round bottom hidden: square on the label)
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, on);
+    TextOutA(dc, 5 * s + 14 * s, 7 * s + (31 * s - text_h(dc)) / 2, title, (int)strlen(title));
+    SelectObject(dc, old);
+    DeleteObject(f);
+}
+/// A selected line on those pages: the page's colour, light, with an edge of it
+void cart_selected(HDC dc, int x, int y, int w, int h, int s, COLORREF tint, COLORREF edge) {
+    startup_gdi::round_rect(dc, x, y, w, h, 7 * s, edge);
+    startup_gdi::round_rect(dc, x + s, y + s, w - 2 * s, h - 2 * s, 6 * s, tint);
 }
 
 // ---- (relink) the Travel page: the places of Link's age, grouped by area (gpu/vk/oot_tp_places.h), with a
@@ -1390,8 +1549,6 @@ struct TravelList {
 TravelList travel;
 int travel_choice = 0, travel_scroll = 0;
 int travel_age_l[2], travel_age_r[2];   // (the Child and Adult buttons' left and right edges as last drawn: the mouse's)
-constexpr int kTravelWidth = 860, kTravelPicX = 354, kTravelPicY = 58, kTravelPicW = 480, kTravelPicH = 270;
-constexpr int kTravelListW = 340;   // (the list's lines end here; the picture is right of it)
 int travel_pick = -1;   // (the age whose places the page lists, chosen with Tab or the top face button; -1 Link's own)
 /// The age whose places the page lists: the one chosen, else Link's as the game side says it (1 adult, else 0: unknown is the
 /// child's). Travelling to the other age's place makes Link that age, as the cheats' Switch age does
@@ -1458,166 +1615,1284 @@ bool travel_has_picture(int place) {
     return false;
 }
 /// The Travel page (paint_menu, page 6): the list on the left, the chosen place's picture, name and area on the right
-void paint_travel(HDC dc, uint32_t w, uint32_t h, int s) {
-    travel_list();
-    const int n = (int)travel.place.size(), sections = (int)travel.areas.size();
-    const int rh = menu_hit::kListRowH * s, top = menu_hit::kListTop * s, list_r = kTravelListW * s;
-    {   // (how many places have pictures: in the heading's line)
-        int with = 0;
-        for (int i = 0; i < n; i++) with += travel_has_picture(travel.place[i]);
-        char line[64];
-        snprintf(line, sizeof line, "%d of %d   %d with pictures", travel_choice + 1, n, with);
-        SetTextColor(dc, RGB(140, 150, 144));
-        SIZE size{};
-        GetTextExtentPoint32A(dc, line, (int)strlen(line), &size);
-        TextOutA(dc, (int)w - 16 * s - size.cx, 22 * s, line, (int)strlen(line));
+
+// ---- (relink) the options page (the Graphics, Gameplay and Controls tabs) as a cartridge: a grey shell with its grooves, a
+// cream label, the tabs as coloured strips across its top (red, green, blue), the rows under small headings, the selected
+// one tinted in its tab's colour with what it does inside it, and the buttons along the bottom. Laid out on a 680-pixel-wide
+// frame at 720 lines, times opt_u (the window's height over 720: 1.5 at 1080 lines); paint_options records where each part
+// went (opt_hit) for the mouse. The game's own typeface (Rubik, vk_startup_paint.h startup_fonts), else the system's ----
+
+/// (relink) A page's rows scrolled as the PC games' settings do: the wheel scrolls them (not the selection, nor a value),
+/// the bar on their right is taken and dragged, or clicked above or below its thumb for a page; the keys and the pad move the
+/// selection, and the next drawing brings it into view (reveal). The mouse selects the row it moves onto (each page's own)
+struct Scroller {
+    int px = 0;              // (how far the rows are scrolled up, in pixels)
+    bool reveal = true;      // (the next drawing scrolls the selected row into view: the keys moved it, or the page opened)
+    int content = 0, room = 0, top = 0;     // (all the rows' height, the band they show in, its top)
+    int bar_l = 0, bar_r = 0, thumb_t = 0, thumb_b = 0;   // (the bar's place for the mouse, its thumb as drawn)
+    int drag = -1;           // (the thumb held: where in it the cursor took it; -1 none)
+};
+Scroller opt_sc, cheat_sc, list_sc[2], travel_sc, controls_sc;
+/// The rows' scroll for this drawing: the selected one (sel_top to sel_bottom, from the rows' top) brought into view when the
+/// keys moved it, else where the wheel or the bar left it; within the rows either way
+void scroll_fit(Scroller& sc, int content, int room, int top, int sel_top, int sel_bottom) {
+    sc.content = content, sc.room = room, sc.top = top;
+    if (content <= room) sc.px = 0;
+    else {
+        if (sc.reveal) sc.px = std::max(std::min(sc.px, sel_top), sel_bottom - room);
+        sc.px = std::clamp(sc.px, 0, content - room);
     }
-    {   // (the ages, beside the title: the one listed lit; Tab or the top face button changes it)
-        HFONT f = font(14 * s, FW_SEMIBOLD);
-        HGDIOBJ was = SelectObject(dc, f);
-        const char* const ages[2] = {"Child", "Adult"};
-        int x = 110 * s;
-        for (int a = 0; a < 2; a++) {
-            SIZE sz{};
-            GetTextExtentPoint32A(dc, ages[a], (int)strlen(ages[a]), &sz);
-            const int bw = (int)sz.cx + 20 * s, bh = 22 * s, by = 14 * s;
-            travel_age_l[a] = x, travel_age_r[a] = x + bw;
-            startup_gdi::round_rect(dc, x, by, bw, bh, 11 * s, a == travel.adult ? RGB(44, 72, 54) : RGB(26, 32, 29));
-            SetTextColor(dc, a == travel.adult ? RGB(255, 255, 255) : RGB(140, 150, 144));
-            TextOutA(dc, x + 10 * s, by + (bh - (int)sz.cy) / 2, ages[a], (int)strlen(ages[a]));
-            x += bw + 6 * s;
+    sc.reveal = false;
+}
+/// The bar at x, when the rows do not all fit: a faint track, its thumb in the page's colour while held (else the shell's)
+void scroll_bar(HDC dc, Scroller& sc, int x, float u, COLORREF held) {
+    sc.bar_l = sc.bar_r = 0;
+    if (sc.content <= sc.room) return;
+    const int w = std::max(3, (int)std::lround(6 * u)), r = w / 2;
+    const int th = std::max((int)std::lround(28 * u), sc.room * sc.room / sc.content);
+    const int ty = sc.top + (sc.room - th) * sc.px / std::max(1, sc.content - sc.room);
+    startup_gdi::round_rect(dc, x, sc.top, w, sc.room, r, cart::kRule);
+    startup_gdi::round_rect(dc, x, ty, w, th, r, sc.drag >= 0 ? held : cart::kOff);
+    sc.thumb_t = ty, sc.thumb_b = ty + th;
+    sc.bar_l = x - (int)std::lround(8 * u), sc.bar_r = x + w + (int)std::lround(8 * u);   // (wider than drawn: easy to take)
+}
+/// The mouse on a page's scroll: the wheel anywhere over the page scrolls (three rows a notch), the bar is dragged or
+/// clicked for a page. True while the cursor is on the bar or holds its thumb (the rows then leave the mouse alone)
+bool scroll_mouse(Scroller& sc, const MkwVkPointer& ptr, int mx, int my, int mw, int mh, float u, bool& changed) {
+    const bool inside = mx >= 0 && my >= 0 && mx < mw && my < mh;
+    const int span = sc.content - sc.room;
+    if (ptr.wheel && inside && span > 0) {
+        const int before = sc.px;
+        sc.px = std::clamp(sc.px - ptr.wheel * (int)std::lround(96 * u), 0, span);   // (three 32-pixel rows a notch)
+        changed |= sc.px != before;
+    }
+    if (sc.drag >= 0) {   // (held: the thumb follows the cursor's height until let go)
+        if (!(ptr.held & HOS_MOUSE_LEFT)) sc.drag = -1, changed = true;
+        else {
+            const int th = sc.thumb_b - sc.thumb_t, free = std::max(1, sc.room - th);
+            const int want = std::clamp((my - sc.drag - sc.top) * span / free, 0, std::max(0, span));
+            if (want != sc.px) sc.px = want, changed = true;
         }
-        SetTextColor(dc, RGB(110, 125, 116));
-        const char* key = "Tab / X";
-        TextOutA(dc, x + 6 * s, 16 * s, key, (int)strlen(key));
-        SelectObject(dc, was);
-        DeleteObject(f);
+        return true;
     }
-    for (int line = travel_scroll; line < std::min(n + sections, travel_scroll + kTeleportLines); line++) {
-        const int y = top + (line - travel_scroll) * rh;
-        list_value_l[line - travel_scroll] = list_r;
-        int section = 0;
-        while (section + 1 < sections && line >= travel.areas[section + 1].first + section + 1) section++;
-        if (line == travel.areas[section].first + section) {
-            SetTextColor(dc, RGB(96, 176, 112));
-            TextOutA(dc, 16 * s, y + 4 * s, travel.areas[section].name, (int)strlen(travel.areas[section].name));
+    const bool on_bar = span > 0 && sc.bar_r > sc.bar_l && mx >= sc.bar_l && mx < sc.bar_r && my >= sc.top && my < sc.top + sc.room;
+    if (on_bar && (ptr.pressed & HOS_MOUSE_LEFT)) {
+        if (my >= sc.thumb_t && my < sc.thumb_b) sc.drag = my - sc.thumb_t;
+        else sc.px = std::clamp(sc.px + (my < sc.thumb_t ? -sc.room : sc.room), 0, span);   // (a page up or down)
+        changed = true;
+    }
+    return on_bar;
+}
+
+float opt_u = 1;   // (the options page's scale: redraw_menu)
+int opt_help_box = 0;   // (the height of the box under the rows for what the selected row does: options_size)
+int& opt_scroll = opt_sc.px;   // (how far the rows are scrolled up, in pixels, when the window is too short for them all)
+/// Where paint_options put each part, in the menu's pixels (the mouse: menu_tick)
+struct OptHit {
+    int tab_l[TAB_COUNT] = {}, tab_r[TAB_COUNT] = {}, tabs_bottom = 0;
+    int body_top = 0, body_bottom = 0;            // (the rows' visible band)
+    int rows = 0, row_top[kRows] = {}, row_bottom[kRows] = {};
+    int kind[kRows] = {};                         // (0 a list, 1 a switch, 2 choices, 3 a slider, 4 a page)
+    int value_l[kRows] = {}, value_r[kRows] = {};   // (the value's part of the row)
+    int choices[kRows] = {}, choice_l[kRows][6] = {}, choice_r[kRows][6] = {};
+    int track_l[kRows] = {}, track_r[kRows] = {};
+} opt_hit;
+
+/// A row's value as text
+std::string row_text(const Row& r, int v) { return r.value && r.text ? r.text(v) : ""; }
+/// How a row's value is shown: 1 an on/off switch, 2 its few short choices side by side, 3 a slider, 4 a page, 0 a list
+int row_kind(const Row& r) {
+    if (!r.value) return 4;
+    if (r.text == tx_onoff) return 1;
+    if (is_slider(r) || stops_at_ends(r)) return 3;
+    static const int* const few[] = {&opts.upscale, &opts.realtime, &opts.text_speed, &opts.audio_output, &opts.ultrawide,
+                                     &opts.robust, &opts.mouse_native, &opts.button_prompts};
+    for (const int* f : few)
+        if (r.value == f && (r.hi - r.lo) / std::max(1, r.step) + 1 <= 4) return 2;
+    return 0;
+}
+/// The tallest text of what a row does, over every row and every line its value can have: the box under the rows keeps that room
+int opt_help_most(float u) {
+    HDC dc = CreateCompatibleDC(nullptr);
+    HFONT f = cart::face(13 * u, 0);
+    HGDIOBJ old = SelectObject(dc, f);
+    const int width = (int)((680 - 20 - 20 - 24) * u);
+    int most = 0;
+    for (const Row& r : rows) {
+        int hint = 0;
+        for (int v = r.lo; r.value && r.hint && v <= r.hi; v++)
+            for (int k = 0; const char* t = r.hint(v, k); k++) hint = std::max(hint, wrap_help(dc, t, width, 0, 0, false));
+        most = std::max(most, wrap_help(dc, r.help, width, 0, 0, false) + (hint ? (int)(4 * u) + hint : 0));
+    }
+    SelectObject(dc, old), DeleteObject(f), DeleteDC(dc);
+    return most;
+}
+// (the frame's sizes, in its pixels at 720 lines)
+constexpr float kOptW = 680, kOptTop = 22, kOptTabH = 36, kOptRowH = 32, kOptHeadH = 24, kOptFootH = 36, kOptPendH = 34;
+/// The rows' height on tab t, the selected row's text left out
+float opt_rows_h(int t) {
+    float hh = 0;
+    const char* last = nullptr;
+    for (int k = 0, n = tab_row_count(t); k < n; k++) {
+        int place = 0;
+        const char* g = row_group(tab_row_to_global(t, k), &place);
+        if (*g && (!last || strcmp(g, last))) hh += kOptHeadH;
+        last = g;
+        hh += kOptRowH;
+    }
+    return hh;
+}
+
+void paint_options(HDC dc, uint32_t w, uint32_t h) {
+    using namespace cart;
+    const float u = opt_u;
+    const auto P = [u](float v) { return (int)std::lround(v * u); };
+    const int W = (int)w, H = (int)h;
+    const TabLook& look = kTabs[cur_tab];
+    SetBkMode(dc, TRANSPARENT);
+    // the shell, its grooves and the label (the corners outside it black: see-through, menu_bmp is keyed)
+    startup_gdi::fill(dc, 0, 0, W, H, RGB(0, 0, 0));
+    startup_gdi::round_rect(dc, 0, 0, W, H, P(14), kShell);
+    for (int x = P(40); x + P(3) < W - P(40); x += P(9)) startup_gdi::fill(dc, x, P(8), P(3), P(6), kGroove);
+    const int lx = P(10), lw = W - 2 * lx, ly = P(kOptTop), lh = H - ly - P(12);
+    startup_gdi::round_rect(dc, lx, ly, lw, lh, P(9), kLabel);
+    // the tabs: strips across the label's top, the shown one taller
+    static const char* const titles[TAB_COUNT] = {"Graphics", "Gameplay", "Controls"};
+    const float units = 1.3f + (TAB_COUNT - 1);
+    int x = lx;
+    for (int t = 0; t < TAB_COUNT; t++) {
+        const bool on = t == cur_tab;
+        const int tw = (int)std::lround((float)(lw - P(3) * (TAB_COUNT - 1)) * (on ? 1.3f : 1.0f) / units);
+        const int top = ly + (on ? 0 : P(7)), right = t == TAB_COUNT - 1 ? lx + lw : x + tw;
+        const COLORREF c = on ? kTabs[t].strip : mix(kTabs[t].strip, kLabel, hover_tab == t ? 0.25f : 0.5f);
+        startup_gdi::round_rect(dc, x, top, right - x, ly + P(kOptTabH) - top + P(9), P(9), c);   // (its bottom hidden below)
+        HFONT f = face(on ? 17 * u : 14 * u, on ? 3 : 1);
+        HGDIOBJ old = SelectObject(dc, f);
+        SetTextColor(dc, on ? kTabs[t].on : mix(kTabs[t].on, c, 0.15f));
+        TextOutA(dc, x + P(14), top + (ly + P(kOptTabH) - top - text_h(dc)) / 2, titles[t], (int)strlen(titles[t]));
+        SelectObject(dc, old), DeleteObject(f);
+        opt_hit.tab_l[t] = x, opt_hit.tab_r[t] = right;
+        x = right + P(3);
+    }
+    opt_hit.tabs_bottom = ly + P(kOptTabH);
+    startup_gdi::fill(dc, lx, ly + P(kOptTabH), lw, P(9), kLabel);   // (the label again under the strips' round bottoms)
+    // the bottom: what the selected row does, the restart line when one is pending, then the buttons
+    const bool pending = restart_pending() != 0;
+    const int foot_top = ly + lh - P(kOptFootH), pend_top = foot_top - (pending ? P(kOptPendH) : 0);
+    const int help_top = pend_top - opt_help_box;
+    startup_gdi::fill(dc, lx, foot_top, lw, std::max(1, P(1)), kRule);
+    HFONT small = face(12.5f * u, 1);
+    HGDIOBJ old = SelectObject(dc, small);
+    if (pending) {
+        startup_gdi::round_rect(dc, lx + P(12), pend_top + P(3), lw - P(24), P(kOptPendH) - P(8), P(8), kTag);
+        SetTextColor(dc, RGB(0x6B, 0x52, 0x0C));
+        const std::string line = restart_line(dc, lw - P(48)) + " (when the menu closes)";
+        TextOutA(dc, lx + P(24), pend_top + P(3) + (P(kOptPendH) - P(8) - text_h(dc)) / 2, line.c_str(), (int)line.size());
+    }
+    // the rows
+    const int body_l = lx + P(10), body_r = lx + lw - P(10);
+    const int body_top = ly + P(kOptTabH) + P(6), body_bottom = help_top - P(4);
+    opt_hit.body_top = body_top, opt_hit.body_bottom = body_bottom;
+    HFONT name_f = face(15 * u, 0), name_b = face(15 * u, 2), value_f = face(14 * u, 0), chip_f = face(13 * u, 0),
+          chip_b = face(13 * u, 2), head_f = face(10.5f * u, 2), help_f = face(13 * u, 0), tag_f = face(9.5f * u, 2);
+    const int n = tab_row_count(cur_tab), sel = tab_selected[cur_tab];
+    const int help_w = body_r - body_l - P(24);
+    SelectObject(dc, help_f);
+    const Row& selected = rows[tab_row_to_global(cur_tab, sel)];
+    // (the rows' places, all one height; scrolled so the selected one shows when they do not all fit)
+    int y = 0, sel_top = 0, sel_bottom = 0;
+    std::vector<int> head_at(n, -1), top_at(n);
+    const char* last = nullptr;
+    for (int k = 0; k < n; k++) {
+        int place = 0;
+        const char* g = row_group(tab_row_to_global(cur_tab, k), &place);
+        if (*g && (!last || strcmp(g, last))) head_at[k] = y, y += P(kOptHeadH);
+        last = g;
+        top_at[k] = y;
+        y += P(kOptRowH);
+        if (k == sel) sel_top = top_at[k] - (head_at[k] >= 0 ? P(kOptHeadH) : 0), sel_bottom = y;
+    }
+    const int room = body_bottom - body_top;
+    scroll_fit(opt_sc, y, room, body_top, sel_top, sel_bottom);
+    HRGN clip = CreateRectRgn(lx, body_top, lx + lw, body_bottom);
+    SelectClipRgn(dc, clip);
+    opt_hit.rows = n;
+    for (int k = 0; k < n; k++) {
+        const int gi = tab_row_to_global(cur_tab, k);
+        const Row& r = rows[gi];
+        const bool on = k == sel;
+        if (head_at[k] >= 0) {
+            int place = 0;
+            SelectObject(dc, head_f);
+            SetTextColor(dc, kFaint);
+            startup_gdi::spaced(dc, row_group(gi, &place), body_l + P(12), body_top + head_at[k] - opt_scroll + P(10), P(2.5f), false);
+        }
+        const int top = body_top + top_at[k] - opt_scroll, rh = P(kOptRowH);
+        opt_hit.row_top[k] = top, opt_hit.row_bottom[k] = top + rh;
+        if (on) {
+            startup_gdi::round_rect(dc, body_l, top + P(2), body_r - body_l, rh - P(3), P(10), look.edge);
+            startup_gdi::round_rect(dc, body_l + std::max(1, P(1.5f)), top + P(2) + std::max(1, P(1.5f)),
+                                    body_r - body_l - 2 * std::max(1, P(1.5f)), rh - P(3) - 2 * std::max(1, P(1.5f)), P(9), look.tint);
+        } else {
+            const bool next_heads = k + 1 < n && head_at[k + 1] >= 0;
+            if (k + 1 < n && k + 1 != sel && !next_heads) startup_gdi::fill(dc, body_l + P(4), top + rh - 1, body_r - body_l - P(8), std::max(1, P(1)), kRule);
+        }
+        const int mid = top + P(kOptRowH) / 2 + P(1);
+        // the name, then its restart tag
+        SelectObject(dc, on ? name_b : name_f);
+        SetTextColor(dc, kInk);
+        TextOutA(dc, body_l + P(12), mid - text_h(dc) / 2, r.name, (int)strlen(r.name));
+        int after = body_l + P(12) + text_w(dc, r.name);
+        if (r.restart) {
+            SelectObject(dc, tag_f);
+            const int tw = text_w(dc, "restart") + P(10), th = text_h(dc) + P(2);
+            startup_gdi::round_rect(dc, after + P(8), mid - th / 2, tw, th, th / 2, kTag);
+            SetTextColor(dc, kTagInk);
+            TextOutA(dc, after + P(13), mid - th / 2 + P(1), "restart", 7);
+            after += P(8) + tw;
+        }
+        // the value, from the right
+        const int vr = body_r - P(12);
+        const int kind = row_kind(r);
+        opt_hit.kind[k] = kind, opt_hit.value_r[k] = vr, opt_hit.choices[k] = 0;
+        if (kind == 4) {   // (a page)
+            cart::triangle(dc, vr - P(5), mid, P(10), 1, look.strip);
+            opt_hit.value_l[k] = vr - P(20);
+        } else if (kind == 1) {   // (a switch)
+            const int sw = P(36), sh = P(20), sx = vr - sw, sy = mid - sh / 2;
+            startup_gdi::round_rect(dc, sx, sy, sw, sh, sh / 2, *r.value ? look.strip : kOff);
+            const int knob = sh - P(6);
+            startup_gdi::round_rect(dc, *r.value ? sx + sw - P(3) - knob : sx + P(3), sy + P(3), knob, knob, knob / 2, RGB(255, 255, 255));
+            opt_hit.value_l[k] = sx;
+        } else if (kind == 2) {   // (its few choices side by side)
+            const int count = std::min(6, (r.hi - r.lo) / std::max(1, r.step) + 1);
+            std::vector<std::string> labels;
+            int total = 0;
+            for (int i = 0; i < count; i++) {
+                labels.push_back(row_text(r, r.lo + i * r.step));
+                SelectObject(dc, chip_b);
+                total += text_w(dc, labels.back()) + P(18) + (i ? P(3) : 0);
+            }
+            int cx = vr - total;
+            const int ch = P(22);
+            for (int i = 0; i < count; i++) {
+                const bool picked = *r.value == r.lo + i * r.step;
+                SelectObject(dc, chip_b);
+                const int cw = text_w(dc, labels[i]) + P(18);
+                if (picked) startup_gdi::round_rect(dc, cx, mid - ch / 2, cw, ch, ch / 2, look.strip);
+                SelectObject(dc, picked ? chip_b : chip_f);
+                SetTextColor(dc, picked ? look.on : kSoft);
+                TextOutA(dc, cx + (cw - text_w(dc, labels[i])) / 2, mid - text_h(dc) / 2, labels[i].c_str(), (int)labels[i].size());
+                opt_hit.choice_l[k][i] = cx, opt_hit.choice_r[k][i] = cx + cw;
+                cx += cw + P(3);
+            }
+            opt_hit.choices[k] = count, opt_hit.value_l[k] = vr - total;
+        } else if (kind == 3) {   // (a slider, its value after it)
+            SelectObject(dc, value_f);
+            const std::string t = row_text(r, *r.value);
+            const int vw = std::max(text_w(dc, t), P(44));
+            SetTextColor(dc, kInk);
+            TextOutA(dc, vr - text_w(dc, t), mid - text_h(dc) / 2, t.c_str(), (int)t.size());
+            const int tr = vr - vw - P(12), tl = tr - P(120);
+            const int knob_x = tl + (tr - tl) * menu_hit::slider_permille(*r.value, r.lo, r.hi) / 1000;
+            startup_gdi::round_rect(dc, tl, mid - P(2), tr - tl, P(4), P(2), kTrack);
+            startup_gdi::round_rect(dc, tl, mid - P(2), std::max(P(4), knob_x - tl), P(4), P(2), look.strip);
+            const int kd = P(16);
+            startup_gdi::round_rect(dc, knob_x - kd / 2, mid - kd / 2, kd, kd, kd / 2, on ? look.tint : kLabel);
+            startup_gdi::round_rect(dc, knob_x - kd / 2 + P(2), mid - kd / 2 + P(2), kd - P(4), kd - P(4), (kd - P(4)) / 2, look.strip);
+            opt_hit.track_l[k] = tl, opt_hit.track_r[k] = tr, opt_hit.value_l[k] = tl - P(8);
+        } else {   // (a list: its value; the selected row's in a pill between two arrows)
+            std::string t = row_text(r, *r.value);
+            const bool fixed = row_fixed(r.value);
+            if (on && !fixed) {
+                SelectObject(dc, chip_b);
+                const int room_w = vr - after - P(70);
+                while (t.size() > 4 && text_w(dc, t) > room_w) t.pop_back();
+                const int pw = text_w(dc, t) + P(24), ph = P(24), px = vr - P(16) - pw;
+                const bool output_row = r.value == &opts.output_res;
+                const bool can_l = !output_row || step_output_choice(*r.value, -1) != *r.value;
+                const bool can_r = !output_row || step_output_choice(*r.value, 1) != *r.value;
+                cart::triangle(dc, vr - P(5), mid, P(10), 1, can_r ? look.strip : kOff);
+                startup_gdi::round_rect(dc, px, mid - ph / 2, pw, ph, ph / 2, look.strip);
+                SetTextColor(dc, look.on);
+                TextOutA(dc, px + P(12), mid - text_h(dc) / 2, t.c_str(), (int)t.size());
+                cart::triangle(dc, px - P(11), mid, P(10), -1, can_l ? look.strip : kOff);
+                opt_hit.value_l[k] = px - P(18);
+            } else {
+                SelectObject(dc, value_f);
+                const int room_w = vr - after - P(16);
+                if (text_w(dc, t) > room_w) {
+                    while (t.size() > 1 && text_w(dc, t + "...") > room_w) t.pop_back();
+                    t += "...";
+                }
+                SetTextColor(dc, fixed ? kFaint : kSoft);
+                TextOutA(dc, vr - text_w(dc, t), mid - text_h(dc) / 2, t.c_str(), (int)t.size());
+                opt_hit.value_l[k] = vr - text_w(dc, t);
+            }
+        }
+    }
+    SelectClipRgn(dc, nullptr);
+    DeleteObject(clip);
+    {   // what the selected row does, and the line on its value: in its box, a bar of the tab's colour at its left
+        startup_gdi::fill(dc, body_l + P(4), help_top + P(2), body_r - body_l - P(8), std::max(1, P(1)), kRule);
+        startup_gdi::round_rect(dc, body_l + P(6), help_top + P(12), P(3), opt_help_box - P(20), P(1.5f), look.strip);
+        SelectObject(dc, help_f);
+        SetTextColor(dc, kHelp);
+        const int hy = help_top + P(10);
+        const int about = wrap_help(dc, selected.help, help_w, body_l + P(18), hy, true);
+        if (const char* hint = selected.value && selected.hint ? selected.hint(*selected.value, -1) : nullptr) {
+            SetTextColor(dc, kSoft);
+            wrap_help(dc, hint, help_w, body_l + P(18), hy + about + P(4), true);
+        }
+    }
+    scroll_bar(dc, opt_sc, body_r + P(2), u, look.strip);   // (more above or below: the bar on the right)
+    // the buttons: what the selected row's buttons do, Back, the tabs, the version
+    SelectObject(dc, small);
+    const int fy = foot_top + P(kOptFootH) / 2;
+    int fx = lx + P(16);
+    const auto glyph = [&](const char* letter, COLORREF c) {
+        const int d = P(19);
+        startup_gdi::round_rect(dc, fx, fy - d / 2, d, d, d / 2, c);
+        SetTextColor(dc, RGB(255, 255, 255));
+        TextOutA(dc, fx + (d - text_w(dc, letter)) / 2, fy - text_h(dc) / 2, letter, (int)strlen(letter));
+        fx += d + P(6);
+    };
+    const auto say = [&](const char* t) {
+        SetTextColor(dc, kHelp);
+        TextOutA(dc, fx, fy - text_h(dc) / 2, t, (int)strlen(t));
+        fx += text_w(dc, t) + P(20);
+    };
+    const int skind = row_kind(selected);
+    if (skind == 4 || skind == 1) glyph("A", kBlue), say(skind == 4 ? "Open" : "Switch");
+    else {
+        cart::triangle(dc, fx + P(5), fy, P(10), -1, kYellow), cart::triangle(dc, fx + P(17), fy, P(10), 1, kYellow);
+        fx += P(28);
+        say("Change");
+    }
+    glyph("B", kGreen), say("Back");
+    {   // (the tabs: the bumpers, Q and E)
+        const char* t = "LB RB";
+        const int tw = text_w(dc, t) + P(10), th = P(19);
+        startup_gdi::round_rect(dc, fx, fy - th / 2, tw, th, P(5), kFaint);
+        SetTextColor(dc, RGB(255, 255, 255));
+        TextOutA(dc, fx + P(5), fy - text_h(dc) / 2, t, (int)strlen(t));
+        fx += tw + P(6);
+        say("Tabs");
+    }
+    SetTextColor(dc, kFaint);
+    const std::string ver = version_text(RELINK_VERSION);
+    if (fx + text_w(dc, ver) < lx + lw - P(16)) TextOutA(dc, lx + lw - P(16) - text_w(dc, ver), fy - text_h(dc) / 2, ver.c_str(), (int)ver.size());
+    SelectObject(dc, old);
+    for (HFONT f : {small, name_f, name_b, value_f, chip_f, chip_b, head_f, help_f, tag_f}) DeleteObject(f);
+}
+/// The options page's size at a window of w x h: the frame at the scale that fits, as tall as its longest tab with the
+/// tallest text open, or the window's height less a margin (the rows scroll then)
+void options_size(uint32_t w, uint32_t h, uint32_t* mw, uint32_t* mh) {
+    float u = std::min((float)h / 720.0f, ((float)w - 32.0f) / kOptW);
+    u = std::clamp(u, 0.6f, 4.0f);
+    static float measured_at = -1;
+    static int help_most = 0;
+    if (measured_at != u) help_most = opt_help_most(u), measured_at = u;
+    opt_u = u;
+    opt_help_box = help_most + (int)std::lround(20 * u);
+    float rows_h = 0;
+    for (int t = 0; t < TAB_COUNT; t++) rows_h = std::max(rows_h, opt_rows_h(t));
+    const float pend = restart_pending() ? kOptPendH : 0;
+    const float full = (kOptTop + kOptTabH + 6 + rows_h + 4 + pend + kOptFootH + 12) * u + (float)opt_help_box;
+    *mw = (uint32_t)std::lround(kOptW * u);
+    *mh = (uint32_t)std::min(full, (float)h - 16.0f * u);
+}
+
+// ---- (relink) the Cheats page as the options' cartridge: the Gameplay tab's green, its rows under small headings, each
+// with the control it is (a switch, a button for an action, a choice between arrows, a page), what the selected one does in
+// the box under them, and a word when an action was done there. The rows keep their numbers (cheat_selected, menu_tick);
+// cheat_order is the order they are shown in ----
+const char* const cheat_labels[kCheatRows] = {"Heart protection", "No-clip flight", "Mark position", "Return to mark", "Set time",
+                                              "Inventory item", "Change quantity", "Free camera", "Teleport", "Switch age",
+                                              "Inventory", "Travel"};
+const char* const cheat_help[kCheatRows] = {
+    "Protects Link's hearts. Hits can still knock him back.",
+    "Enable double-tap Jump for takeoff and landing. Hold Jump to climb or L to descend.",
+    "Remember Link's position for this loaded scene.",
+    "Teleport Link to the marked position in the current scene.",
+    "Choose an hour with Left or Right. Enter sets the world clock.",
+    "Choose a consumable with Left or Right.",
+    "Choose how many to add or remove. Enter applies the change.",
+    "Move and look with your usual controls. Page Up / Page Down or R / L changes height.",
+    "Enter opens the map list (Left or Right also changes the map here). Link travels through the game's own map change, in his current age.",
+    "Swaps Link between child and adult and reloads this map in the other age (the Market when this map has no match).",
+    "Enter opens the inventory editor: unlock or relock equipment, items, upgrades and quest items, and change amounts.",
+    "Go to a place you know: villages, dungeons' entrances, shops, warps. Each with a picture from your own game."};
+constexpr int cheat_order[kCheatRows] = {0, 1, 7, 9, 2, 3, 4, 5, 6, 10, 8, 11};
+const char* cheat_group(int row) {
+    return row == 0 || row == 1 || row == 7 || row == 9 ? "LINK" : row == 2 || row == 3 ? "POSITION" : row == 4 ? "WORLD"
+         : row == 5 || row == 6 || row == 10 ? "ITEMS" : "TRAVEL";
+}
+/// How a row is shown: 1 a switch, 2 a choice between arrows, 3 a button for its action, 4 a page
+int cheat_kind(int row) {
+    return row == 0 || row == 1 || row == 7 ? 1 : row == 4 || row == 5 || row == 6 || row == 8 ? 2 : row == 2 || row == 3 || row == 9 ? 3 : 4;
+}
+std::string cheat_done;   // (what the last action did, said in the box under the rows until cheat_done_until)
+int64_t cheat_done_until = 0;
+void cheat_say(std::string what) {
+    cheat_done = std::move(what);
+    cheat_done_until = prof_now() + 3000000000LL;
+}
+/// Where paint_cheats put each part, by the row's number (the mouse: menu_tick)
+struct CheatHit {
+    int body_top = 0, body_bottom = 0;
+    int top[kCheatRows] = {}, bottom[kCheatRows] = {}, value_l[kCheatRows] = {}, value_r[kCheatRows] = {};
+} cheat_hit;
+int& cheat_scroll = cheat_sc.px;
+int cheat_help_box = 0;
+constexpr float kCheatHeadH = 24;
+
+void paint_cheats(HDC dc, uint32_t w, uint32_t h) {
+    using namespace cart;
+    const float u = opt_u;
+    const auto P = [u](float v) { return (int)std::lround(v * u); };
+    const int W = (int)w, H = (int)h;
+    const TabLook& look = kTabs[1];
+    SetBkMode(dc, TRANSPARENT);
+    startup_gdi::fill(dc, 0, 0, W, H, RGB(0, 0, 0));
+    startup_gdi::round_rect(dc, 0, 0, W, H, P(14), kShell);
+    for (int x = P(40); x + P(3) < W - P(40); x += P(9)) startup_gdi::fill(dc, x, P(8), P(3), P(6), kGroove);
+    const int lx = P(10), lw = W - 2 * lx, ly = P(kOptTop), lh = H - ly - P(12);
+    startup_gdi::round_rect(dc, lx, ly, lw, lh, P(9), kLabel);
+    // the strip: the page's name, and where it came from
+    HFONT strip_f = face(17 * u, 3), small = face(12.5f * u, 1);
+    HGDIOBJ old = SelectObject(dc, strip_f);
+    const int sw = text_w(dc, "Cheats") + P(28);
+    startup_gdi::round_rect(dc, lx, ly, sw, P(kOptTabH) + P(9), P(9), look.strip);
+    startup_gdi::fill(dc, lx, ly + P(kOptTabH), sw, P(9), kLabel);
+    SetTextColor(dc, look.on);
+    TextOutA(dc, lx + P(14), ly + (P(kOptTabH) - text_h(dc)) / 2, "Cheats", 6);
+    SelectObject(dc, small);
+    SetTextColor(dc, kFaint);
+    const char* from = "Gameplay  >  Cheats";
+    TextOutA(dc, lx + sw + P(12), ly + (P(kOptTabH) - text_h(dc)) / 2, from, (int)strlen(from));
+    // the rows
+    const int foot_top = ly + lh - P(kOptFootH), help_top = foot_top - cheat_help_box;
+    const int body_l = lx + P(10), body_r = lx + lw - P(10), body_top = ly + P(kOptTabH) + P(6), body_bottom = help_top - P(4);
+    cheat_hit.body_top = body_top, cheat_hit.body_bottom = body_bottom;
+    HFONT name_f = face(15 * u, 0), name_b = face(15 * u, 2), value_f = face(14 * u, 0), chip_b = face(13 * u, 2),
+          head_f = face(10.5f * u, 2), help_f = face(13 * u, 0);
+    char clock_text[12], quantity[12];
+    snprintf(clock_text, sizeof clock_text, "%02d:00", clock_hour);
+    snprintf(quantity, sizeof quantity, "%+d", pouch_delta);
+    int y = 0, sel_top = 0, sel_bottom = 0, top_at[kCheatRows] = {}, head_at[kCheatRows];
+    for (int k = 0; k < kCheatRows; k++) {
+        const int row = cheat_order[k];
+        head_at[k] = -1;
+        if (!k || strcmp(cheat_group(row), cheat_group(cheat_order[k - 1]))) head_at[k] = y, y += P(kCheatHeadH);
+        top_at[k] = y;
+        y += P(kOptRowH);
+        if (row == cheat_selected) sel_top = top_at[k] - (head_at[k] >= 0 ? P(kCheatHeadH) : 0), sel_bottom = y;
+    }
+    const int room = body_bottom - body_top;
+    scroll_fit(cheat_sc, y, room, body_top, sel_top, sel_bottom);
+    HRGN clip = CreateRectRgn(lx, body_top, lx + lw, body_bottom);
+    SelectClipRgn(dc, clip);
+    for (int k = 0; k < kCheatRows; k++) {
+        const int row = cheat_order[k];
+        const bool on = row == cheat_selected;
+        if (head_at[k] >= 0) {
+            SelectObject(dc, head_f);
+            SetTextColor(dc, kFaint);
+            startup_gdi::spaced(dc, cheat_group(row), body_l + P(12), body_top + head_at[k] - cheat_scroll + P(10), P(2.5f), false);
+        }
+        const int top = body_top + top_at[k] - cheat_scroll, rh = P(kOptRowH), mid = top + rh / 2 + P(1);
+        cheat_hit.top[row] = top, cheat_hit.bottom[row] = top + rh;
+        if (on) {
+            startup_gdi::round_rect(dc, body_l, top + P(2), body_r - body_l, rh - P(3), P(10), look.edge);
+            const int e = std::max(1, P(1.5f));
+            startup_gdi::round_rect(dc, body_l + e, top + P(2) + e, body_r - body_l - 2 * e, rh - P(3) - 2 * e, P(9), look.tint);
+        } else if (k + 1 < kCheatRows && cheat_order[k + 1] != cheat_selected && head_at[k + 1] < 0) {
+            startup_gdi::fill(dc, body_l + P(4), top + rh - 1, body_r - body_l - P(8), std::max(1, P(1)), kRule);
+        }
+        SelectObject(dc, on ? name_b : name_f);
+        SetTextColor(dc, kInk);
+        TextOutA(dc, body_l + P(12), mid - text_h(dc) / 2, cheat_labels[row], (int)strlen(cheat_labels[row]));
+        const int vr = body_r - P(12);
+        cheat_hit.value_r[row] = vr;
+        const int kind = cheat_kind(row);
+        if (kind == 1) {   // (a switch)
+            const bool is_on = row == 0 ? protect_hearts.load() == 1 : row == 1 ? player_flight.load() >= 0 : free_camera.load() != 0;
+            const int sw2 = P(36), sh = P(20), sx = vr - sw2, sy = mid - sh / 2, knob = sh - P(6);
+            startup_gdi::round_rect(dc, sx, sy, sw2, sh, sh / 2, is_on ? look.strip : kOff);
+            startup_gdi::round_rect(dc, is_on ? sx + sw2 - P(3) - knob : sx + P(3), sy + P(3), knob, knob, knob / 2, RGB(255, 255, 255));
+            cheat_hit.value_l[row] = sx;
+        } else if (kind == 3) {   // (a button for its action: outlined, filled when selected)
+            const char* what = row == 2 ? "Mark" : row == 3 ? "Go back" : "Swap age";
+            SelectObject(dc, chip_b);
+            const int bw = text_w(dc, what) + P(26), bh = P(24), bx = vr - bw;
+            startup_gdi::round_rect(dc, bx, mid - bh / 2, bw, bh, bh / 2, look.strip);
+            if (!on) startup_gdi::round_rect(dc, bx + P(2), mid - bh / 2 + P(2), bw - P(4), bh - P(4), (bh - P(4)) / 2, kLabel);
+            SetTextColor(dc, on ? look.on : look.strip);
+            TextOutA(dc, bx + (bw - text_w(dc, what)) / 2, mid - text_h(dc) / 2, what, (int)strlen(what));
+            cheat_hit.value_l[row] = bx;
+        } else if (kind == 2) {   // (a choice: between arrows when selected)
+            std::string t = row == 4 ? clock_text : row == 5 ? pouch_items[pouch_item] : row == 6 ? std::string(quantity) : teleport_names[teleport_choice];
+            if (on) {
+                SelectObject(dc, chip_b);
+                const int pw = text_w(dc, t) + P(24), ph = P(24), px = vr - P(16) - pw;
+                cart::triangle(dc, vr - P(5), mid, P(10), 1, look.strip);
+                startup_gdi::round_rect(dc, px, mid - ph / 2, pw, ph, ph / 2, look.strip);
+                SetTextColor(dc, look.on);
+                TextOutA(dc, px + P(12), mid - text_h(dc) / 2, t.c_str(), (int)t.size());
+                cart::triangle(dc, px - P(11), mid, P(10), -1, look.strip);
+                cheat_hit.value_l[row] = px - P(18);
+            } else {
+                SelectObject(dc, value_f);
+                SetTextColor(dc, kSoft);
+                TextOutA(dc, vr - text_w(dc, t), mid - text_h(dc) / 2, t.c_str(), (int)t.size());
+                cheat_hit.value_l[row] = vr - text_w(dc, t);
+            }
+        } else {   // (a page)
+            cart::triangle(dc, vr - P(5), mid, P(10), 1, look.strip);
+            cheat_hit.value_l[row] = vr - P(20);
+        }
+    }
+    SelectClipRgn(dc, nullptr);
+    DeleteObject(clip);
+    scroll_bar(dc, cheat_sc, body_r + P(2), u, look.strip);
+    {   // the box: what the selected row does, or for a few seconds what its action just did (with a tick)
+        startup_gdi::fill(dc, body_l + P(4), help_top + P(2), body_r - body_l - P(8), std::max(1, P(1)), kRule);
+        const bool done = !cheat_done.empty() && prof_now() < cheat_done_until;
+        startup_gdi::round_rect(dc, body_l + P(6), help_top + P(12), P(3), cheat_help_box - P(20), P(1.5f), look.strip);
+        SelectObject(dc, done ? name_b : help_f);
+        SetTextColor(dc, done ? look.strip : kHelp);
+        const std::string text = done ? "Done: " + cheat_done : cheat_help[cheat_selected];
+        wrap_help(dc, text.c_str(), body_r - body_l - P(30), body_l + P(18), help_top + P(10), true);
+    }
+    // the buttons: what A does on this row, the arrows where they change it, Back
+    startup_gdi::fill(dc, lx, foot_top, lw, std::max(1, P(1)), kRule);
+    SelectObject(dc, small);
+    const int fy = foot_top + P(kOptFootH) / 2;
+    int fx = lx + P(16);
+    const auto glyph = [&](const char* letter, COLORREF c) {
+        const int d = P(19);
+        startup_gdi::round_rect(dc, fx, fy - d / 2, d, d, d / 2, c);
+        SetTextColor(dc, RGB(255, 255, 255));
+        TextOutA(dc, fx + (d - text_w(dc, letter)) / 2, fy - text_h(dc) / 2, letter, (int)strlen(letter));
+        fx += d + P(6);
+    };
+    const auto say = [&](const char* t) {
+        SetTextColor(dc, kHelp);
+        TextOutA(dc, fx, fy - text_h(dc) / 2, t, (int)strlen(t));
+        fx += text_w(dc, t) + P(20);
+    };
+    const int kind = cheat_kind(cheat_selected);
+    if (kind == 2) {
+        cart::triangle(dc, fx + P(5), fy, P(10), -1, kYellow), cart::triangle(dc, fx + P(17), fy, P(10), 1, kYellow);
+        fx += P(28);
+        say(cheat_selected == 5 ? "Choose" : "Change");
+    }
+    const char* a = cheat_selected == 4 ? "Set the clock" : cheat_selected == 6 ? "Apply" : cheat_selected == 8 ? "Open the list"
+                  : cheat_selected == 5 ? nullptr : kind == 1 ? "Switch" : kind == 3 ? "Do it" : "Open";
+    if (a) glyph("A", kBlue), say(a);
+    glyph("B", kGreen), say("Back");
+    SelectObject(dc, old);
+    for (HFONT f : {strip_f, small, name_f, name_b, value_f, chip_b, head_f, help_f}) DeleteObject(f);
+}
+/// The Cheats page's size: the options' scale, its rows, its box and its bottom, or the window's height less a margin
+void cheats_size(uint32_t w, uint32_t h, uint32_t* mw, uint32_t* mh) {
+    uint32_t ow = 0, oh = 0;
+    options_size(w, h, &ow, &oh);   // (the scale: opt_u)
+    const float u = opt_u;
+    static float measured_at = -1;
+    if (measured_at != u) {
+        HDC dc = CreateCompatibleDC(nullptr);
+        HFONT f = cart::face(13 * u, 2);
+        HGDIOBJ old = SelectObject(dc, f);
+        int most = 0;
+        for (const char* t : cheat_help) most = std::max(most, wrap_help(dc, t, (int)((kOptW - 20 - 20 - 30) * u), 0, 0, false));
+        SelectObject(dc, old), DeleteObject(f), DeleteDC(dc);
+        cheat_help_box = most + (int)std::lround(20 * u);
+        measured_at = u;
+    }
+    const float rows_h = kCheatRows * kOptRowH + 5 * kCheatHeadH;
+    const float full = (kOptTop + kOptTabH + 6 + rows_h + 4 + kOptFootH + 12) * u + (float)cheat_help_box;
+    *mw = (uint32_t)std::lround(kOptW * u);
+    *mh = (uint32_t)std::min(full, (float)h - 16.0f * u);
+}
+
+// ---- (relink) the Teleport and Inventory pages as the Cheats page: the same green cartridge, where they came from and how
+// far down the list is at the top, the list under its sections' small headings, the chosen line tinted with what Enter does
+// on it (a Go button for a map; for an item what it is now, its count between arrows), what the page does in the box under
+// it, the buttons at the bottom. The keys and the choice are menu_tick's as before (teleport_choice, item_choice) ----
+constexpr int kListMost = kItems > kTeleports ? kItems : kTeleports;
+/// Where paint_list put each item's line and its value (the mouse: menu_tick)
+struct ListHit {
+    int body_top = 0, body_bottom = 0, n = 0;
+    int top[kListMost] = {}, bottom[kListMost] = {}, value_l[kListMost] = {}, value_r[kListMost] = {};
+} list_hit;
+int list_help_box = 0;
+
+void paint_list(HDC dc, uint32_t w, uint32_t h, bool inv) {
+    using namespace cart;
+    const float u = opt_u;
+    const auto P = [u](float v) { return (int)std::lround(v * u); };
+    const int W = (int)w, H = (int)h;
+    const TabLook& look = kTabs[1];
+    const int n = inv ? kItems : kTeleports, sections = inv ? kItemSections : kTeleportSections;
+    const TeleportSection* sec = inv ? item_sections.s : teleport_sections;
+    const int choice = inv ? item_choice : teleport_choice;
+    Scroller& lsc = list_sc[inv];
+    int& scroll = lsc.px;
+    SetBkMode(dc, TRANSPARENT);
+    startup_gdi::fill(dc, 0, 0, W, H, RGB(0, 0, 0));
+    startup_gdi::round_rect(dc, 0, 0, W, H, P(14), kShell);
+    for (int x = P(40); x + P(3) < W - P(40); x += P(9)) startup_gdi::fill(dc, x, P(8), P(3), P(6), kGroove);
+    const int lx = P(10), lw = W - 2 * lx, ly = P(kOptTop), lh = H - ly - P(12);
+    startup_gdi::round_rect(dc, lx, ly, lw, lh, P(9), kLabel);
+    // the strip, the way here, and how far down the list is
+    const char* title = inv ? "Inventory" : "Teleport";
+    HFONT strip_f = face(17 * u, 3), small = face(12.5f * u, 1);
+    HGDIOBJ old = SelectObject(dc, strip_f);
+    const int sw = text_w(dc, title) + P(28);
+    startup_gdi::round_rect(dc, lx, ly, sw, P(kOptTabH) + P(9), P(9), look.strip);
+    startup_gdi::fill(dc, lx, ly + P(kOptTabH), sw, P(9), kLabel);
+    SetTextColor(dc, look.on);
+    TextOutA(dc, lx + P(14), ly + (P(kOptTabH) - text_h(dc)) / 2, title, (int)strlen(title));
+    SelectObject(dc, small);
+    SetTextColor(dc, kFaint);
+    const std::string from = std::string("Cheats  >  ") + title;
+    TextOutA(dc, lx + sw + P(12), ly + (P(kOptTabH) - text_h(dc)) / 2, from.c_str(), (int)from.size());
+    char count[32];
+    snprintf(count, sizeof count, "%d of %d", choice + 1, n);
+    TextOutA(dc, lx + lw - P(16) - text_w(dc, count), ly + (P(kOptTabH) - text_h(dc)) / 2, count, (int)strlen(count));
+    // the lines: a heading for each section, then its items
+    const int foot_top = ly + lh - P(kOptFootH), help_top = foot_top - list_help_box;
+    const int body_l = lx + P(10), body_r = lx + lw - P(10), body_top = ly + P(kOptTabH) + P(6), body_bottom = help_top - P(4);
+    list_hit.body_top = body_top, list_hit.body_bottom = body_bottom, list_hit.n = n;
+    HFONT name_f = face(15 * u, 0), name_b = face(15 * u, 2), value_f = face(14 * u, 0), chip_b = face(13 * u, 2),
+          head_f = face(10.5f * u, 2), help_f = face(13 * u, 0), tag_f = face(9.5f * u, 2);
+    std::vector<int> top_at(n), head_at(n, -1);
+    int y = 0, sel_top = 0, sel_bottom = 0;
+    for (int i = 0, s = 0; i < n; i++) {
+        while (s < sections && sec[s].first == i) head_at[i] = y, y += P(kCheatHeadH), s++;
+        top_at[i] = y;
+        y += P(kOptRowH);
+        if (i == choice) sel_top = top_at[i] - (head_at[i] >= 0 ? P(kCheatHeadH) : 0), sel_bottom = y;
+    }
+    const int room = body_bottom - body_top;
+    scroll_fit(lsc, y, room, body_top, sel_top, sel_bottom);
+    HRGN clip = CreateRectRgn(lx, body_top, lx + lw, body_bottom);
+    SelectClipRgn(dc, clip);
+    for (int i = 0, s = 0; i < n; i++) {
+        const int top = body_top + top_at[i] - scroll, rh = P(kOptRowH), mid = top + rh / 2 + P(1);
+        list_hit.top[i] = top, list_hit.bottom[i] = top + rh;
+        if (head_at[i] >= 0) {
+            while (s + 1 < sections && sec[s + 1].first <= i) s++;
+            std::string head = sec[s].name;
+            for (char& c : head) c = (char)toupper((unsigned char)c);
+            SelectObject(dc, head_f);
+            SetTextColor(dc, kFaint);
+            startup_gdi::spaced(dc, head, body_l + P(12), body_top + head_at[i] - scroll + P(10), P(2.5f), false);
+        }
+        if (top + rh < body_top || top > body_bottom) continue;
+        const bool on = i == choice;
+        if (on) {
+            startup_gdi::round_rect(dc, body_l, top + P(2), body_r - body_l, rh - P(3), P(10), look.edge);
+            const int e = std::max(1, P(1.5f));
+            startup_gdi::round_rect(dc, body_l + e, top + P(2) + e, body_r - body_l - 2 * e, rh - P(3) - 2 * e, P(9), look.tint);
+        } else if (i + 1 < n && i + 1 != choice && head_at[i + 1] < 0) {
+            startup_gdi::fill(dc, body_l + P(4), top + rh - 1, body_r - body_l - P(8), std::max(1, P(1)), kRule);
+        }
+        const char* label = inv ? item_names[i] : teleport_names[i];
+        SelectObject(dc, on ? name_b : name_f);
+        SetTextColor(dc, kInk);
+        TextOutA(dc, body_l + P(12), mid - text_h(dc) / 2, label, (int)strlen(label));
+        const int after = body_l + P(12) + text_w(dc, label);
+        const int vr = body_r - P(12);
+        list_hit.value_r[i] = vr, list_hit.value_l[i] = vr;
+        if (!inv) {   // (a map: adult only when it is; on the chosen one, Go)
+            if (teleport_notes[i]) {
+                SelectObject(dc, tag_f);
+                const int tw = text_w(dc, teleport_notes[i]) + P(10), th = text_h(dc) + P(2);
+                startup_gdi::round_rect(dc, after + P(8), mid - th / 2, tw, th, th / 2, kTag);
+                SetTextColor(dc, kTagInk);
+                TextOutA(dc, after + P(13), mid - th / 2 + P(1), teleport_notes[i], (int)strlen(teleport_notes[i]));
+            }
+            if (on) {
+                SelectObject(dc, chip_b);
+                const int bw = text_w(dc, "Go") + P(30), bh = P(24), bx = vr - bw;
+                startup_gdi::round_rect(dc, bx, mid - bh / 2, bw, bh, bh / 2, look.strip);
+                SetTextColor(dc, look.on);
+                TextOutA(dc, bx + (bw - text_w(dc, "Go")) / 2, mid - text_h(dc) / 2, "Go", 2);
+                list_hit.value_l[i] = bx;
+            } else {
+                cart::triangle(dc, vr - P(5), mid, P(10), 1, kOff);
+            }
             continue;
         }
-        const int i = line - section - 1;
-        if (i == travel_choice) startup_gdi::round_rect(dc, 8 * s, y, list_r - 8 * s, rh, 6 * s, RGB(44, 72, 54));
-        SetTextColor(dc, i == travel_choice ? RGB(255, 255, 255) : RGB(196, 204, 198));
-        const char* label = oot_tp_places[travel.place[i]].label;
-        TextOutA(dc, 32 * s, y + 3 * s, label, (int)strlen(label));
-        if (travel_has_picture(travel.place[i])) {   // (a small square: this place has its picture)
-            const int b = 8 * s, x = list_r - 14 * s - b, yy = y + (rh - b) / 2;
-            startup_gdi::round_rect(dc, x, yy, b, b, 2 * s, i == travel_choice ? RGB(200, 220, 205) : RGB(110, 135, 120));
+        // (an item: its count between arrows when it has one and is chosen; else Have or Not yet; ? until the game says)
+        const int have = item_counts[i].load(std::memory_order_relaxed);
+        if (have < 0) {
+            SelectObject(dc, value_f);
+            SetTextColor(dc, kFaint);
+            TextOutA(dc, vr - text_w(dc, "?"), mid - text_h(dc) / 2, "?", 1);
+            list_hit.value_l[i] = vr - text_w(dc, "?");
+        } else if (item_kinds[i]) {
+            char v[16];
+            snprintf(v, sizeof v, "%d", have);
+            if (on) {
+                SelectObject(dc, chip_b);
+                const int pw = std::max(text_w(dc, v) + P(24), P(44)), ph = P(24), px = vr - P(16) - pw;
+                cart::triangle(dc, vr - P(5), mid, P(10), 1, look.strip);
+                startup_gdi::round_rect(dc, px, mid - ph / 2, pw, ph, ph / 2, look.strip);
+                SetTextColor(dc, look.on);
+                TextOutA(dc, px + (pw - text_w(dc, v)) / 2, mid - text_h(dc) / 2, v, (int)strlen(v));
+                cart::triangle(dc, px - P(11), mid, P(10), -1, look.strip);
+                list_hit.value_l[i] = px - P(18);
+            } else {
+                SelectObject(dc, value_f);
+                SetTextColor(dc, have ? kInk : kFaint);
+                TextOutA(dc, vr - text_w(dc, v), mid - text_h(dc) / 2, v, (int)strlen(v));
+                list_hit.value_l[i] = vr - text_w(dc, v);
+            }
+        } else {
+            const char* t = have > 0 ? "Have" : "Not yet";
+            SelectObject(dc, chip_b);
+            const int pw = text_w(dc, t) + P(22), ph = P(22), px = vr - pw;
+            if (have > 0) startup_gdi::round_rect(dc, px, mid - ph / 2, pw, ph, ph / 2, look.strip);
+            else {
+                startup_gdi::round_rect(dc, px, mid - ph / 2, pw, ph, ph / 2, kOff);
+                startup_gdi::round_rect(dc, px + P(1.5f), mid - ph / 2 + P(1.5f), pw - P(3), ph - P(3), (ph - P(3)) / 2, on ? look.tint : kLabel);
+            }
+            SetTextColor(dc, have > 0 ? look.on : kSoft);
+            TextOutA(dc, px + (pw - text_w(dc, t)) / 2, mid - text_h(dc) / 2, t, (int)strlen(t));
+            list_hit.value_l[i] = px;
         }
     }
-    fill(dc, list_r + 6 * s, top, 2 * s, kTeleportLines * rh, RGB(30, 38, 33));   // (the line between the list and the picture)
+    SelectClipRgn(dc, nullptr);
+    DeleteObject(clip);
+    scroll_bar(dc, lsc, body_r + P(2), u, look.strip);
+    {   // the box: what the page does with the chosen line
+        startup_gdi::fill(dc, body_l + P(4), help_top + P(2), body_r - body_l - P(8), std::max(1, P(1)), kRule);
+        startup_gdi::round_rect(dc, body_l + P(6), help_top + P(12), P(3), list_help_box - P(20), P(1.5f), look.strip);
+        SelectObject(dc, help_f);
+        SetTextColor(dc, kHelp);
+        const char* text = !inv ? (teleport_notes[choice] ? "Link travels through the game's own map change, in his current age. This "
+                                                            "place is there for the adult only."
+                                                          : "Link travels through the game's own map change, in his current age, and "
+                                                            "arrives at the map's own entrance.")
+                         : item_kinds[choice] ? "Enter unlocks it or takes it away. Left and Right change how many you carry, up "
+                                                "to what your bag holds."
+                                              : "Enter unlocks it or takes it away again: equipment, items, upgrades and quest items.";
+        wrap_help(dc, text, body_r - body_l - P(30), body_l + P(18), help_top + P(10), true);
+    }
+    // the buttons
+    startup_gdi::fill(dc, lx, foot_top, lw, std::max(1, P(1)), kRule);
+    SelectObject(dc, small);
+    const int fy = foot_top + P(kOptFootH) / 2;
+    int fx = lx + P(16);
+    const auto glyph = [&](const char* letter, COLORREF c, bool round) {
+        SetTextColor(dc, RGB(255, 255, 255));
+        const int d = P(19), gw = round ? d : text_w(dc, letter) + P(10);
+        startup_gdi::round_rect(dc, fx, fy - d / 2, gw, d, round ? d / 2 : P(5), c);
+        TextOutA(dc, fx + (gw - text_w(dc, letter)) / 2, fy - text_h(dc) / 2, letter, (int)strlen(letter));
+        fx += gw + P(6);
+    };
+    const auto say = [&](const char* t) {
+        SetTextColor(dc, kHelp);
+        TextOutA(dc, fx, fy - text_h(dc) / 2, t, (int)strlen(t));
+        fx += text_w(dc, t) + P(20);
+    };
+    if (inv && item_kinds[choice]) {
+        cart::triangle(dc, fx + P(5), fy, P(10), -1, kYellow), cart::triangle(dc, fx + P(17), fy, P(10), 1, kYellow);
+        fx += P(28);
+        say("How many");
+    }
+    glyph("A", kBlue, true), say(inv ? (item_counts[choice].load() > 0 ? "Take away" : "Unlock") : "Go there");
+    if (!inv) {
+        cart::triangle(dc, fx + P(5), fy, P(10), -1, kYellow), cart::triangle(dc, fx + P(17), fy, P(10), 1, kYellow);
+        fx += P(28);
+        say("Section");
+    } else glyph("LB RB", kFaint, false), say("Section");
+    glyph("B", kGreen, true), say("Back");
+    SelectObject(dc, old);
+    for (HFONT f : {strip_f, small, name_f, name_b, value_f, chip_b, head_f, help_f, tag_f}) DeleteObject(f);
+}
+/// The list pages' size: the options' scale, their rows as the window allows (they scroll), the box and the bottom
+void list_size(uint32_t w, uint32_t h, bool inv, uint32_t* mw, uint32_t* mh) {
+    uint32_t ow = 0, oh = 0;
+    options_size(w, h, &ow, &oh);   // (the scale: opt_u)
+    const float u = opt_u;
+    list_help_box = (int)std::lround(58 * u);   // (two lines of help and the margins)
+    const int n = inv ? kItems : kTeleports, sections = inv ? kItemSections : kTeleportSections;
+    const float rows_h = n * kOptRowH + sections * kCheatHeadH;
+    const float full = (kOptTop + kOptTabH + 6 + rows_h + 4 + kOptFootH + 12) * u + (float)list_help_box;
+    *mw = (uint32_t)std::lround(kOptW * u);
+    *mh = (uint32_t)std::min(full, (float)h - 16.0f * u);
+}
+
+// ---- (relink) the Travel page as the Cheats page's cartridge, wider: at the top the way here, the age the places are for
+// (Child | Adult) and how many have pictures; on the left the places by area, the chosen one tinted, a dot on those with their
+// picture; on the right the chosen place's picture, its name, its area and age, and Go. The keys are menu_tick's as before;
+// the mouse (travel_mouse) chooses with a click and travels with a second one, or with Go ----
+constexpr float kTravelW = 1000, kTravelListR = 400, kTravelCardL = 420;
+struct TravelHit {
+    int body_top = 0, body_bottom = 0, list_r = 0;
+    std::vector<int> top, bottom;
+    int age_t = 0, age_b = 0;
+    int go_l = 0, go_r = 0, go_t = 0, go_b = 0;
+} travel_hit;
+int& travel_px_scroll = travel_sc.px;
+
+void paint_travel_cart(HDC dc, uint32_t w, uint32_t h) {
+    using namespace cart;
+    travel_list();
+    const float u = opt_u;
+    const auto P = [u](float v) { return (int)std::lround(v * u); };
+    const int W = (int)w, H = (int)h;
+    const TabLook& look = kTabs[1];
+    const int n = (int)travel.place.size(), sections = (int)travel.areas.size();
+    SetBkMode(dc, TRANSPARENT);
+    startup_gdi::fill(dc, 0, 0, W, H, RGB(0, 0, 0));
+    startup_gdi::round_rect(dc, 0, 0, W, H, P(14), kShell);
+    for (int x = P(40); x + P(3) < W - P(40); x += P(9)) startup_gdi::fill(dc, x, P(8), P(3), P(6), kGroove);
+    const int lx = P(10), lw = W - 2 * lx, ly = P(kOptTop), lh = H - ly - P(12);
+    startup_gdi::round_rect(dc, lx, ly, lw, lh, P(9), kLabel);
+    // the strip, the way here, the ages, how many places and pictures
+    HFONT strip_f = face(17 * u, 3), small = face(12.5f * u, 1), chip_b = face(13 * u, 2), chip_f = face(13 * u, 0);
+    HGDIOBJ old = SelectObject(dc, strip_f);
+    const int sw = text_w(dc, "Travel") + P(28), mid_top = ly + P(kOptTabH) / 2;
+    startup_gdi::round_rect(dc, lx, ly, sw, P(kOptTabH) + P(9), P(9), look.strip);
+    startup_gdi::fill(dc, lx, ly + P(kOptTabH), sw, P(9), kLabel);
+    SetTextColor(dc, look.on);
+    TextOutA(dc, lx + sw / 2 - text_w(dc, "Travel") / 2, mid_top - text_h(dc) / 2, "Travel", 6);
+    SelectObject(dc, small);
+    SetTextColor(dc, kFaint);
+    const char* from = "Cheats  >  Travel";
+    TextOutA(dc, lx + sw + P(12), mid_top - text_h(dc) / 2, from, (int)strlen(from));
+    {   // (Child | Adult: a pill each, the listed one filled; Tab or X on a pad changes it)
+        int x = lx + sw + P(24) + text_w(dc, from);
+        const char* const ages[2] = {"Child", "Adult"};
+        const int bh = P(24);
+        travel_hit.age_t = mid_top - bh / 2, travel_hit.age_b = mid_top + bh / 2;
+        for (int a = 0; a < 2; a++) {
+            const bool on = a == travel.adult;
+            SelectObject(dc, on ? chip_b : chip_f);
+            const int bw = text_w(dc, ages[a]) + P(24);
+            startup_gdi::round_rect(dc, x, mid_top - bh / 2, bw, bh, bh / 2, on ? look.strip : kRule);
+            SetTextColor(dc, on ? look.on : kSoft);
+            TextOutA(dc, x + (bw - text_w(dc, ages[a])) / 2, mid_top - text_h(dc) / 2, ages[a], (int)strlen(ages[a]));
+            travel_age_l[a] = x, travel_age_r[a] = x + bw;
+            x += bw + P(4);
+        }
+    }
+    int with = 0;
+    for (int i = 0; i < n; i++) with += travel_has_picture(travel.place[i]);
+    char count[64];
+    snprintf(count, sizeof count, "%d of %d  \xB7  %d with pictures", n ? travel_choice + 1 : 0, n, with);
+    SelectObject(dc, small);
+    SetTextColor(dc, kFaint);
+    TextOutA(dc, lx + lw - P(16) - text_w(dc, count), mid_top - text_h(dc) / 2, count, (int)strlen(count));
+    // the places, by area
+    const int foot_top = ly + lh - P(kOptFootH);
+    const int body_l = lx + P(10), list_r = lx + P(kTravelListR), body_top = ly + P(kOptTabH) + P(6), body_bottom = foot_top - P(6);
+    travel_hit.body_top = body_top, travel_hit.body_bottom = body_bottom, travel_hit.list_r = list_r;
+    travel_hit.top.assign(n, 0), travel_hit.bottom.assign(n, 0);
+    HFONT name_f = face(15 * u, 0), name_b = face(15 * u, 2), head_f = face(10.5f * u, 2), help_f = face(13 * u, 0),
+          big = face(21 * u, 3), go_f = face(15 * u, 3);
+    std::vector<int> top_at(n), head_at(n, -1);
+    int y = 0, sel_top = 0, sel_bottom = 0;
+    for (int i = 0, s = 0; i < n; i++) {
+        while (s < sections && travel.areas[s].first == i) head_at[i] = y, y += P(kCheatHeadH), s++;
+        top_at[i] = y;
+        y += P(kOptRowH);
+        if (i == travel_choice) sel_top = top_at[i] - (head_at[i] >= 0 ? P(kCheatHeadH) : 0), sel_bottom = y;
+    }
+    const int room = body_bottom - body_top;
+    scroll_fit(travel_sc, y, room, body_top, sel_top, sel_bottom);
+    HRGN clip = CreateRectRgn(lx, body_top, list_r + P(10), body_bottom);
+    SelectClipRgn(dc, clip);
+    for (int i = 0, s = 0; i < n; i++) {
+        const int top = body_top + top_at[i] - travel_px_scroll, rh = P(kOptRowH), mid = top + rh / 2 + P(1);
+        travel_hit.top[i] = top, travel_hit.bottom[i] = top + rh;
+        if (head_at[i] >= 0) {
+            while (s + 1 < sections && travel.areas[s + 1].first <= i) s++;
+            std::string head = travel.areas[s].name;
+            for (char& c : head) c = (char)toupper((unsigned char)c);
+            SelectObject(dc, head_f);
+            SetTextColor(dc, kFaint);
+            startup_gdi::spaced(dc, head, body_l + P(12), body_top + head_at[i] - travel_px_scroll + P(10), P(2.5f), false);
+        }
+        if (top + rh < body_top || top > body_bottom) continue;
+        const bool on = i == travel_choice;
+        if (on) {
+            startup_gdi::round_rect(dc, body_l, top + P(2), list_r - body_l, rh - P(3), P(10), look.edge);
+            const int e = std::max(1, P(1.5f));
+            startup_gdi::round_rect(dc, body_l + e, top + P(2) + e, list_r - body_l - 2 * e, rh - P(3) - 2 * e, P(9), look.tint);
+        } else if (i + 1 < n && i + 1 != travel_choice && head_at[i + 1] < 0) {
+            startup_gdi::fill(dc, body_l + P(4), top + rh - 1, list_r - body_l - P(8), std::max(1, P(1)), kRule);
+        }
+        const char* label = oot_tp_places[travel.place[i]].label;
+        SelectObject(dc, on ? name_b : name_f);
+        SetTextColor(dc, kInk);
+        std::string t = label;
+        const int room_w = list_r - body_l - P(46);
+        if (text_w(dc, t) > room_w) {
+            while (t.size() > 1 && text_w(dc, t + "...") > room_w) t.pop_back();
+            t += "...";
+        }
+        TextOutA(dc, body_l + P(12), mid - text_h(dc) / 2, t.c_str(), (int)t.size());
+        if (travel_has_picture(travel.place[i])) {   // (a dot: this place has its picture)
+            const int d = P(8);
+            startup_gdi::round_rect(dc, list_r - P(16) - d, mid - d / 2, d, d, d / 2, look.strip);
+        }
+    }
+    SelectClipRgn(dc, nullptr);
+    DeleteObject(clip);
+    scroll_bar(dc, travel_sc, list_r + P(2), u, look.strip);
+    // the card: the picture, the place, Go
+    const int cl = lx + P(kTravelCardL), cr = lx + lw - P(16), cw = cr - cl, ph = cw * 9 / 16, py = body_top + P(6);
     const int place = n ? travel.place[travel_choice] : -1;
-    const int px = kTravelPicX * s, py = kTravelPicY * s, pw = kTravelPicW * s, ph = kTravelPicH * s;
     TeleportPicture pic;
     bool reading = false;
     const bool have = travel_picture(place, &pic, &reading);
+    startup_gdi::round_rect(dc, cl - P(3), py - P(3), cw + P(6), ph + P(6), P(10), kShell);   // (the picture in a frame of the shell)
     GdiFlush();
-    if (have && paint_bits && pic.w && pic.h) {   // (the picture, scaled to its box: written into the bitmap's pixels)
-        for (int y = 0; y < ph && py + y < (int)h; y++) {
-            const uint32_t sy = (uint32_t)((uint64_t)y * pic.h / ph);
-            uint32_t* row = paint_bits + (size_t)(py + y) * w;
-            for (int x = 0; x < pw && px + x < (int)w; x++) {
-                const unsigned char* q = &pic.rgba[((size_t)sy * pic.w + (uint32_t)((uint64_t)x * pic.w / pw)) * 4];
-                row[px + x] = (uint32_t)q[0] << 16 | (uint32_t)q[1] << 8 | q[2];
+    if (have && paint_bits && pic.w && pic.h) {
+        for (int yy = 0; yy < ph && py + yy < H; yy++) {
+            const uint32_t sy = (uint32_t)((uint64_t)yy * pic.h / ph);
+            uint32_t* row = paint_bits + (size_t)(py + yy) * W;
+            for (int xx = 0; xx < cw && cl + xx < W; xx++) {
+                const unsigned char* q = &pic.rgba[((size_t)sy * pic.w + (uint32_t)((uint64_t)xx * pic.w / cw)) * 4];
+                row[cl + xx] = (uint32_t)q[0] << 16 | (uint32_t)q[1] << 8 | q[2];
             }
         }
-    } else {   // (none yet: a striped box saying how one comes)
-        for (int y = 0; y < ph && paint_bits && py + y < (int)h; y++) {
-            uint32_t* row = paint_bits + (size_t)(py + y) * w;
-            for (int x = 0; x < pw && px + x < (int)w; x++) row[px + x] = ((x + y) / (12 * s)) % 2 ? 0x171d1a : 0x141917;
+    } else {   // (none yet: soft stripes, and how one comes)
+        for (int yy = 0; yy < ph && paint_bits && py + yy < H; yy++) {
+            uint32_t* row = paint_bits + (size_t)(py + yy) * W;
+            for (int xx = 0; xx < cw && cl + xx < W; xx++) row[cl + xx] = ((xx + yy) / P(14)) % 2 ? 0xE2DBCB : 0xE8E2D4;
         }
-        SetTextColor(dc, RGB(130, 140, 134));
-        const char* l1 = reading ? "Reading the picture..." : "No picture yet:";
-        const char* l2 = reading ? "" : "stay here a few seconds with the menu closed.";
-        SIZE a{}, b{};
-        GetTextExtentPoint32A(dc, l1, (int)strlen(l1), &a);
-        GetTextExtentPoint32A(dc, l2, (int)strlen(l2), &b);
-        TextOutA(dc, px + (pw - (int)a.cx) / 2, py + ph / 2 - (int)a.cy, l1, (int)strlen(l1));
-        TextOutA(dc, px + (pw - (int)b.cx) / 2, py + ph / 2, l2, (int)strlen(l2));
+        SelectObject(dc, help_f);
+        SetTextColor(dc, kSoft);
+        const char* l1 = reading ? "Reading the picture..." : "No picture yet";
+        const char* l2 = reading ? "" : "Stay here a few seconds with the menu closed.";
+        TextOutA(dc, cl + (cw - text_w(dc, l1)) / 2, py + ph / 2 - text_h(dc), l1, (int)strlen(l1));
+        TextOutA(dc, cl + (cw - text_w(dc, l2)) / 2, py + ph / 2 + P(2), l2, (int)strlen(l2));
     }
     if (place >= 0) {
         const OotTpPlace& p = oot_tp_places[place];
-        HFONT big = font(20 * s, FW_SEMIBOLD), small = font(14 * s, FW_NORMAL);
-        HGDIOBJ was = SelectObject(dc, big);
-        SetTextColor(dc, RGB(255, 255, 255));
-        TextOutA(dc, px, py + ph + 12 * s, p.label, (int)strlen(p.label));
-        SelectObject(dc, small);
-        SetTextColor(dc, RGB(150, 165, 155));
+        int ty = py + ph + P(16);
+        SelectObject(dc, big);
+        SetTextColor(dc, kInk);
+        TextOutA(dc, cl, ty, p.label, (int)strlen(p.label));
+        ty += text_h(dc) + P(2);
         const char* area = "";
         for (const TeleportSection& a : travel.areas)
             if (a.first <= travel_choice) area = a.name;
-        char where[96];
+        char where[128];
         const bool other = link_age.load(std::memory_order_relaxed) >= 0 && link_age.load(std::memory_order_relaxed) != travel.adult;
-        snprintf(where, sizeof where, "%s   (%s%s)", area, travel.adult ? "adult" : "child",
-                 other ? ": Link becomes that age" : "");
-        TextOutA(dc, px, py + ph + 40 * s, where, (int)strlen(where));
-        SetTextColor(dc, RGB(176, 186, 180));
-        wrap_help(dc, "Link arrives here through the game's own map change, as when he walks in. A small square in the list: a "
-                      "place with a picture.", pw, px, py + ph + 70 * s, true);
-        SelectObject(dc, was);
-        DeleteObject(big);
-        DeleteObject(small);
+        snprintf(where, sizeof where, "%s  \xB7  %s%s", area, travel.adult ? "adult" : "child", other ? ": Link becomes that age" : "");
+        SelectObject(dc, help_f);
+        SetTextColor(dc, kSoft);
+        TextOutA(dc, cl, ty, where, (int)strlen(where));
+        ty += text_h(dc) + P(8);
+        SetTextColor(dc, kHelp);
+        ty += wrap_help(dc, "Link arrives here through the game's own map change, as when he walks in. A dot in the list: a place "
+                            "with its picture.", cw - P(130), cl, ty, true);
+        // Go, at the card's bottom right
+        SelectObject(dc, go_f);
+        const int bw = text_w(dc, "Go there") + P(40), bh = P(38), bx = cr - bw, by = std::max(py + ph + P(16), body_bottom - bh);
+        startup_gdi::round_rect(dc, bx, by + P(3), bw, bh, P(12), RGB(0x2C, 0x64, 0x38));
+        startup_gdi::round_rect(dc, bx, by, bw, bh, P(12), look.strip);
+        SetTextColor(dc, look.on);
+        TextOutA(dc, bx + (bw - text_w(dc, "Go there")) / 2, by + (bh - text_h(dc)) / 2, "Go there", 8);
+        travel_hit.go_l = bx, travel_hit.go_r = bx + bw, travel_hit.go_t = by, travel_hit.go_b = by + bh + P(3);
+    } else travel_hit.go_l = travel_hit.go_r = 0;
+    // the buttons
+    startup_gdi::fill(dc, lx, foot_top, lw, std::max(1, P(1)), kRule);
+    SelectObject(dc, small);
+    const int fy = foot_top + P(kOptFootH) / 2;
+    int fx = lx + P(16);
+    const auto glyph = [&](const char* letter, COLORREF c, bool round) {
+        SetTextColor(dc, RGB(255, 255, 255));
+        const int d = P(19), gw = round ? d : text_w(dc, letter) + P(10);
+        startup_gdi::round_rect(dc, fx, fy - d / 2, gw, d, round ? d / 2 : P(5), c);
+        TextOutA(dc, fx + (gw - text_w(dc, letter)) / 2, fy - text_h(dc) / 2, letter, (int)strlen(letter));
+        fx += gw + P(6);
+    };
+    const auto say = [&](const char* t) {
+        SetTextColor(dc, kHelp);
+        TextOutA(dc, fx, fy - text_h(dc) / 2, t, (int)strlen(t));
+        fx += text_w(dc, t) + P(20);
+    };
+    glyph("A", kBlue, true), say("Go there");
+    cart::triangle(dc, fx + P(5), fy, P(10), -1, kYellow), cart::triangle(dc, fx + P(17), fy, P(10), 1, kYellow);
+    fx += P(28);
+    say("Area");
+    glyph("X", kFaint, true), say("Child / Adult");
+    glyph("Y", kYellow, true), say("Picture again");
+    glyph("B", kGreen, true), say("Back");
+    SelectObject(dc, old);
+    for (HFONT f : {strip_f, small, chip_b, chip_f, name_f, name_b, head_f, help_f, big, go_f}) DeleteObject(f);
+}
+/// The Travel page's size: the options' scale, wider for the picture, as tall as the window allows (the list scrolls)
+void travel_size(uint32_t w, uint32_t h, uint32_t* mw, uint32_t* mh) {
+    uint32_t ow = 0, oh = 0;
+    options_size(w, h, &ow, &oh);   // (the scale: opt_u)
+    const float u = opt_u;
+    *mw = (uint32_t)std::min((float)kTravelW * u, (float)w - 32.0f);
+    *mh = (uint32_t)std::min((kOptTop + kOptTabH + 6 + 560 + kOptFootH + 12) * u, (float)h - 16.0f * u);
+}
+/// The mouse over the Travel page: a place clicked is chosen, clicked again it is travelled to, as Go is; the wheel moves the
+/// choice (stopping at the ends); a right click goes back
+void travel_mouse(const MkwVkPointer& ptr, int mx, int my, int mw, int mh, bool moved, int n, bool* press, bool& changed) {
+    const bool inside = mx >= 0 && my >= 0 && mx < mw && my < mh;
+    MkwVkPointer sp = ptr;
+    if (mx >= travel_hit.list_r + (int)std::lround(16 * opt_u)) sp.wheel = 0;   // (the wheel scrolls the list when over it)
+    const bool on_bar = scroll_mouse(travel_sc, sp, mx, my, mw, mh, opt_u, changed);
+    int over = -1;
+    if (inside && !on_bar && mx < travel_hit.list_r && my >= travel_hit.body_top && my < travel_hit.body_bottom)
+        for (int i = 0; i < n && i < (int)travel_hit.top.size(); i++)
+            if (my >= travel_hit.top[i] && my < travel_hit.bottom[i]) over = i;
+    const bool on_go = inside && mx >= travel_hit.go_l && mx < travel_hit.go_r && my >= travel_hit.go_t && my < travel_hit.go_b;
+    if ((ptr.pressed & HOS_MOUSE_LEFT) && over >= 0) {
+        if (over == travel_choice) press[7] = true;
+        else travel_choice = over, changed = true;
+    } else if ((ptr.pressed & HOS_MOUSE_LEFT) && on_go) press[7] = true;
+    (void)moved;
+    if (ptr.pressed & HOS_MOUSE_RIGHT) press[5] = true;
+}
+
+// ---- (relink) the Controls page (the bindings) as the Controls tab's blue cartridge: the way here and the layout preset at
+// the top, the columns' names, the Switch's buttons under small headings (their short names as round marks), the chosen row
+// tinted with its chosen binding filled (yellow while it waits for the new input), Reset to defaults as a button, what Enter
+// and Delete do in the box under the rows. The keys and the choice are menu_tick's (csel, ccol, listening) ----
+const char* control_group(int i) {
+    return i < 4 ? "FACE BUTTONS" : i < 8 ? "SHOULDERS" : i < 10 ? "MENU" : i < 12 ? "STICKS" : i < 16 ? "D-PAD" : i < 20 ? "MOVE (KEYS)"
+         : i < kControls ? "CAMERA (KEYS)" : "";
+}
+struct ControlsHit {
+    int body_top = 0, body_bottom = 0;
+    int top[kControls + 1] = {}, bottom[kControls + 1] = {};
+    int pad_l = 0, pad_r = 0, key_l = 0, key_r = 0, reset_l = 0, reset_r = 0;
+} controls_hit;
+int& controls_scroll = controls_sc.px;
+constexpr float kCtlPadX = 250, kCtlKeyX = 455, kCtlHelpH = 58;
+
+void paint_controls_cart(HDC dc, uint32_t w, uint32_t h) {
+    using namespace cart;
+    const float u = opt_u;
+    const auto P = [u](float v) { return (int)std::lround(v * u); };
+    const int W = (int)w, H = (int)h;
+    const TabLook& look = kTabs[2];
+    SetBkMode(dc, TRANSPARENT);
+    startup_gdi::fill(dc, 0, 0, W, H, RGB(0, 0, 0));
+    startup_gdi::round_rect(dc, 0, 0, W, H, P(14), kShell);
+    for (int x = P(40); x + P(3) < W - P(40); x += P(9)) startup_gdi::fill(dc, x, P(8), P(3), P(6), kGroove);
+    const int lx = P(10), lw = W - 2 * lx, ly = P(kOptTop), lh = H - ly - P(12);
+    startup_gdi::round_rect(dc, lx, ly, lw, lh, P(9), kLabel);
+    HFONT strip_f = face(17 * u, 3), small = face(12.5f * u, 1), name_f = face(15 * u, 0), name_b = face(15 * u, 2),
+          cell_f = face(14 * u, 0), cell_b = face(13.5f * u, 2), head_f = face(10.5f * u, 2), help_f = face(13 * u, 0), mark_f = face(12 * u, 3);
+    HGDIOBJ old = SelectObject(dc, strip_f);
+    const int sw = text_w(dc, "Controls") + P(28), mid_top = ly + P(kOptTabH) / 2;
+    startup_gdi::round_rect(dc, lx, ly, sw, P(kOptTabH) + P(9), P(9), look.strip);
+    startup_gdi::fill(dc, lx, ly + P(kOptTabH), sw, P(9), kLabel);
+    SetTextColor(dc, look.on);
+    TextOutA(dc, lx + P(14), mid_top - text_h(dc) / 2, "Controls", 8);
+    SelectObject(dc, small);
+    SetTextColor(dc, kFaint);
+    const char* from = "Controls  >  Buttons";
+    TextOutA(dc, lx + sw + P(12), mid_top - text_h(dc) / 2, from, (int)strlen(from));
+    const std::string layout = std::string("Layout: ") + tx_pad_layout(opts.pad_layout);
+    TextOutA(dc, lx + lw - P(16) - text_w(dc, layout), mid_top - text_h(dc) / 2, layout.c_str(), (int)layout.size());
+    // the columns' names
+    const int body_l = lx + P(10), body_r = lx + lw - P(10), pad_x = lx + P(kCtlPadX), key_x = lx + P(kCtlKeyX);
+    const int cols_y = ly + P(kOptTabH) + P(8);
+    SelectObject(dc, head_f);
+    SetTextColor(dc, kFaint);
+    startup_gdi::spaced(dc, "BUTTON", body_l + P(12), cols_y, P(2.5f), false);
+    startup_gdi::spaced(dc, "GAMEPAD", pad_x, cols_y, P(2.5f), false);
+    startup_gdi::spaced(dc, "KEYBOARD", key_x, cols_y, P(2.5f), false);
+    controls_hit.pad_l = pad_x - P(10), controls_hit.pad_r = key_x - P(10), controls_hit.key_l = key_x - P(10), controls_hit.key_r = body_r;
+    // the rows
+    const int foot_top = ly + lh - P(kOptFootH), help_top = foot_top - P(kCtlHelpH);
+    const int body_top = cols_y + P(16), body_bottom = help_top - P(4);
+    controls_hit.body_top = body_top, controls_hit.body_bottom = body_bottom;
+    int y = 0, sel_top = 0, sel_bottom = 0, top_at[kControls + 1], head_at[kControls + 1];
+    for (int i = 0; i <= kControls; i++) {
+        head_at[i] = -1;
+        if (i < kControls && (!i || strcmp(control_group(i), control_group(i - 1)))) head_at[i] = y, y += P(kCheatHeadH);
+        if (i == kControls) y += P(8);
+        top_at[i] = y;
+        y += P(kOptRowH) + (i == kControls ? P(4) : 0);
+        if (i == csel) sel_top = top_at[i] - (head_at[i] >= 0 ? P(kCheatHeadH) : 0), sel_bottom = y;
     }
-    SetTextColor(dc, RGB(130, 140, 134));
-    const int bottom = top + kTeleportLines * rh + 8 * s;
-    const char* hint = "Up/Down choose   Left/Right or Q/E: next area   Tab or X: child / adult   Enter travels   Esc back";
-    TextOutA(dc, 16 * s, bottom, hint, (int)strlen(hint));
-    const char* hint2 = "PgUp/PgDn/Home/End jump   Y or Backspace: take this picture again at the next stay there";
-    TextOutA(dc, 16 * s, bottom + 20 * s, hint2, (int)strlen(hint2));
+    const int room = body_bottom - body_top;
+    scroll_fit(controls_sc, y, room, body_top, sel_top, sel_bottom);
+    HRGN clip = CreateRectRgn(lx, body_top, lx + lw, body_bottom);
+    SelectClipRgn(dc, clip);
+    for (int i = 0; i <= kControls; i++) {
+        const int top = body_top + top_at[i] - controls_scroll, rh = P(kOptRowH), mid = top + rh / 2 + P(1);
+        controls_hit.top[i] = top, controls_hit.bottom[i] = top + rh;
+        if (head_at[i] >= 0) {
+            SelectObject(dc, head_f);
+            SetTextColor(dc, kFaint);
+            startup_gdi::spaced(dc, control_group(i), body_l + P(12), body_top + head_at[i] - controls_scroll + P(10), P(2.5f), false);
+        }
+        if (top + rh < body_top || top > body_bottom) continue;
+        const bool on = i == csel;
+        if (i == kControls) {   // (Reset to defaults: a button, red outlined, filled when chosen)
+            const char* t = "Reset to defaults";
+            SelectObject(dc, cell_b);
+            const int bw = text_w(dc, t) + P(30), bh = P(26), bx = body_l + P(8);
+            const TabLook& red = kTabs[0];
+            startup_gdi::round_rect(dc, bx, mid - bh / 2, bw, bh, bh / 2, red.strip);
+            if (!on) startup_gdi::round_rect(dc, bx + P(2), mid - bh / 2 + P(2), bw - P(4), bh - P(4), (bh - P(4)) / 2, kLabel);
+            SetTextColor(dc, on ? red.on : red.strip);
+            TextOutA(dc, bx + (bw - text_w(dc, t)) / 2, mid - text_h(dc) / 2, t, (int)strlen(t));
+            controls_hit.reset_l = bx, controls_hit.reset_r = bx + bw;
+            continue;
+        }
+        if (on) {
+            startup_gdi::round_rect(dc, body_l, top + P(2), body_r - body_l, rh - P(3), P(10), look.edge);
+            const int e = std::max(1, P(1.5f));
+            startup_gdi::round_rect(dc, body_l + e, top + P(2) + e, body_r - body_l - 2 * e, rh - P(3) - 2 * e, P(9), look.tint);
+        } else if (i + 1 < kControls && i + 1 != csel && head_at[i + 1] < 0) {
+            startup_gdi::fill(dc, body_l + P(4), top + rh - 1, body_r - body_l - P(8), std::max(1, P(1)), kRule);
+        }
+        // the Switch's button: its short name in a round mark, a longer one as words
+        const Control& c = controls[i];
+        if (strlen(c.name) <= 2) {
+            SelectObject(dc, mark_f);
+            const int mw2 = std::max(P(24), text_w(dc, c.name) + P(14)), mh2 = P(24);
+            startup_gdi::round_rect(dc, body_l + P(10), mid - mh2 / 2, mw2, mh2, mh2 / 2, kInk);
+            SetTextColor(dc, kLabel);
+            TextOutA(dc, body_l + P(10) + (mw2 - text_w(dc, c.name)) / 2, mid - text_h(dc) / 2, c.name, (int)strlen(c.name));
+        } else {
+            SelectObject(dc, on ? name_b : name_f);
+            SetTextColor(dc, kInk);
+            TextOutA(dc, body_l + P(12), mid - text_h(dc) / 2, c.name, (int)strlen(c.name));
+        }
+        // its two bindings
+        for (int col = 0; col < 2; col++) {
+            const int x = col ? key_x : pad_x;
+            std::string v = col == 0 ? (keys_only(i) ? "-" : pad_name(host->binding(HOS_BIND_PAD, c.button, 0))) : keys_text(c.button);
+            const bool chosen = on && col == ccol;
+            if (chosen && listening) v = col == 0 ? "Press a button..." : "Press a key...";
+            if (chosen) {
+                SelectObject(dc, cell_b);
+                const int pw = text_w(dc, v) + P(22), ph = P(24);
+                startup_gdi::round_rect(dc, x - P(10), mid - ph / 2, pw, ph, ph / 2, listening ? kYellow : look.strip);
+                SetTextColor(dc, listening ? kInk : look.on);
+                TextOutA(dc, x + P(1), mid - text_h(dc) / 2, v.c_str(), (int)v.size());
+            } else {
+                SelectObject(dc, cell_f);
+                SetTextColor(dc, col == 0 && keys_only(i) ? kOff : on ? kInk : kSoft);
+                TextOutA(dc, x, mid - text_h(dc) / 2, v.c_str(), (int)v.size());
+            }
+        }
+    }
+    SelectClipRgn(dc, nullptr);
+    DeleteObject(clip);
+    scroll_bar(dc, controls_sc, body_r + P(2), u, look.strip);
+    {   // the box: what Enter and Delete do here, or what the page waits for
+        startup_gdi::fill(dc, body_l + P(4), help_top + P(2), body_r - body_l - P(8), std::max(1, P(1)), kRule);
+        startup_gdi::round_rect(dc, body_l + P(6), help_top + P(12), P(3), P(kCtlHelpH) - P(20), P(1.5f), listening ? kYellow : look.strip);
+        SelectObject(dc, listening ? name_b : help_f);
+        SetTextColor(dc, kHelp);
+        std::string text;
+        if (listening) text = std::string(listening == 1 ? "Press the gamepad button" : "Press the key") + " for " + controls[csel].name +
+                              " now. Esc cancels; it stops by itself after a few seconds.";
+        else if (csel == kControls) text = "Puts every gamepad button back as the Layout preset has them.";
+        else if (keys_only(csel)) text = "The keyboard's key for this one (the gamepad's stick does it there). Enter binds a new key; Delete clears it.";
+        else text = "Enter binds a new one in the chosen column: press the button or the key. Delete clears it. Left and Right change the column.";
+        wrap_help(dc, text.c_str(), body_r - body_l - P(30), body_l + P(18), help_top + P(10), true);
+    }
+    // the buttons
+    startup_gdi::fill(dc, lx, foot_top, lw, std::max(1, P(1)), kRule);
+    SelectObject(dc, small);
+    const int fy = foot_top + P(kOptFootH) / 2;
+    int fx = lx + P(16);
+    const auto glyph = [&](const char* letter, COLORREF c, bool round) {
+        SetTextColor(dc, RGB(255, 255, 255));
+        const int d = P(19), gw = round ? d : text_w(dc, letter) + P(10);
+        startup_gdi::round_rect(dc, fx, fy - d / 2, gw, d, round ? d / 2 : P(5), c);
+        TextOutA(dc, fx + (gw - text_w(dc, letter)) / 2, fy - text_h(dc) / 2, letter, (int)strlen(letter));
+        fx += gw + P(6);
+    };
+    const auto say = [&](const char* t) {
+        SetTextColor(dc, kHelp);
+        TextOutA(dc, fx, fy - text_h(dc) / 2, t, (int)strlen(t));
+        fx += text_w(dc, t) + P(20);
+    };
+    if (listening) glyph("Esc", kFaint, false), say("Cancel");
+    else {
+        glyph("A", kBlue, true), say(csel == kControls ? "Reset" : "Bind");
+        if (csel < kControls) {
+            if (!keys_only(csel)) {
+                cart::triangle(dc, fx + P(5), fy, P(10), -1, kYellow), cart::triangle(dc, fx + P(17), fy, P(10), 1, kYellow);
+                fx += P(28);
+                say("Column");
+            }
+            glyph("Del", kFaint, false), say("Clear");
+        }
+        glyph("B", kGreen, true), say("Back");
+    }
+    SelectObject(dc, old);
+    for (HFONT f : {strip_f, small, name_f, name_b, cell_f, cell_b, head_f, help_f, mark_f}) DeleteObject(f);
+}
+/// The Controls page's size: the options' scale, as tall as its rows or the window allows (they scroll)
+void controls_size(uint32_t w, uint32_t h, uint32_t* mw, uint32_t* mh) {
+    uint32_t ow = 0, oh = 0;
+    options_size(w, h, &ow, &oh);   // (the scale: opt_u)
+    const float u = opt_u;
+    const float rows_h = (kControls + 1) * kOptRowH + 7 * kCheatHeadH + 12;
+    const float full = (kOptTop + kOptTabH + 8 + 16 + rows_h + 4 + kCtlHelpH + kOptFootH + 12) * u;
+    *mw = (uint32_t)std::lround(kOptW * u);
+    *mh = (uint32_t)std::min(full, (float)h - 16.0f * u);
 }
 
 void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
-    fill(dc, 0, 0, (int)w, (int)h, RGB(16, 20, 18));
-    fill(dc, 0, 0, (int)w, 2 * s, RGB(96, 176, 112));
+    if (page == 0) return paint_options(dc, w, h);   // (relink: the cartridge)
+    if (page == 2) return paint_cheats(dc, w, h);
+    if (page == 3 || page == 4) return paint_list(dc, w, h, page == 4);
+    if (page == 6) return paint_travel_cart(dc, w, h);
+    if (page == 1) return paint_controls_cart(dc, w, h);
     SetBkMode(dc, TRANSPARENT);
     HFONT title = font(20 * s, FW_SEMIBOLD), body = font(16 * s, FW_NORMAL);
     HGDIOBJ old = SelectObject(dc, title);
-    SetTextColor(dc, RGB(236, 240, 236));
+    struct Owned { HFONT f; ~Owned() { DeleteObject(f); } } hints{font(13 * s, FW_NORMAL)};   // (the lines of keys and help: smaller,
+                                                                                                // as the options page's)
+    // (relink) the cartridge (cart_page), each page in a colour: the Gameplay tab's green for the cheats and their lists,
+    // the Controls tab's blue for the controls, yellow for the restart question and red for Quit game's
+    const int look = page == 5 ? (ask_quit ? 0 : -1) : page == 1 ? 2 : 1;
+    const COLORREF strip = look < 0 ? cart::kYellow : cart::kTabs[look].strip, tint = look < 0 ? cart::kTag : cart::kTabs[look].tint,
+                   edge = look < 0 ? RGB(0xE3, 0xC4, 0x74) : cart::kTabs[look].edge, on = look < 0 ? cart::kInk : cart::kTabs[look].on;
     const char* heading = page == 6 ? "Travel" : page == 5 ? (ask_quit ? "Quit game" : "Restart needed") : page == 4 ? "Inventory" : page == 3 ? "Teleport"
-                        : page == 2 ? "Cheats" : "Project ReLink";
-    TextOutA(dc, 16 * s, 12 * s, heading, (int)strlen(heading));
-    {   // (which build, beside the title, so a report can say it without opening the log; the release alone when the whole
+                        : page == 2 ? "Cheats" : "Controls";
+    cart_page(dc, (int)w, (int)h, s, heading, strip, on);
+    {   // (which build, at the top right, so a report can say it without opening the log; the release alone when the whole
         // line would run into the title)
-        SIZE tsz{};
-        GetTextExtentPoint32A(dc, heading, (int)strlen(heading), &tsz);
         HFONT small = font(12 * s, FW_NORMAL);
         SelectObject(dc, small);
-        SetTextColor(dc, RGB(140, 150, 144));
+        SetTextColor(dc, cart::kFaint);
         std::string ver = RELINK_VERSION;
-        const int room = (int)w - 32 * s - tsz.cx - 12 * s;
+        const int room = (int)w / 2 - 16 * s;
         SIZE sz{};
         GetTextExtentPoint32A(dc, ver.c_str(), (int)ver.size(), &sz);
         if (sz.cx > room && ver.find(" (") != std::string::npos) {
             ver.resize(ver.find(" ("));
             GetTextExtentPoint32A(dc, ver.c_str(), (int)ver.size(), &sz);
         }
-        if (sz.cx <= room && page != 6) TextOutA(dc, (int)w - 16 * s - sz.cx, 18 * s, ver.c_str(), (int)ver.size());
+        if (sz.cx <= room && page != 6 && page != 3 && page != 4) TextOutA(dc, (int)w - 16 * s - sz.cx, 18 * s, ver.c_str(), (int)ver.size());
         SelectObject(dc, title);
         DeleteObject(small);
     }
     SelectObject(dc, body);
-    if (page == 6) {   // (relink) the Travel page
-        paint_travel(dc, w, h, s);
-        SelectObject(dc, old);
-        DeleteObject(title);
-        DeleteObject(body);
-        return;
-    }
     if (page == 5) {   // (relink) the restart question, as the menu closes with a setting that takes a restart, or Quit game's
-        SetTextColor(dc, RGB(236, 240, 236));
+        SetTextColor(dc, cart::kInk);
         const std::string ask = ask_quit ? std::string("Quit the game?") : "Restart to apply " + restart_list(" and ") + "?";
         const int asked = wrap_help(dc, ask.c_str(), (int)w - 32 * s, 16 * s, 46 * s, true);   // (one line or two)
         HFONT small = font(14 * s, FW_NORMAL);
         SelectObject(dc, small);
-        SetTextColor(dc, RGB(176, 186, 180));
+        SetTextColor(dc, cart::kHelp);
         const char* lost = "Progress since your last save is lost.";
         TextOutA(dc, 16 * s, std::min(46 * s + asked + 4 * s, 94 * s), lost, (int)strlen(lost));
         SelectObject(dc, body);
@@ -1626,15 +2901,14 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
             const int x = menu_hit::ask_button_x(i, s), y = menu_hit::kAskButtonY * s;
             const int bw = menu_hit::kAskButtonW * s, bh = menu_hit::kAskButtonH * s;
             const bool sel = i == ask_sel;
-            if (sel) startup_gdi::round_rect(dc, x - s, y - s, bw + 2 * s, bh + 2 * s, 7 * s, RGB(104, 186, 124));   // (a green edge)
-            startup_gdi::round_rect(dc, x, y, bw, bh, 6 * s, sel ? RGB(44, 72, 54) : RGB(30, 40, 34));
+            startup_gdi::round_rect(dc, x, y, bw, bh, bh / 2, sel ? strip : cart::kRule);
             SIZE sz{};
             GetTextExtentPoint32A(dc, labels[i], (int)strlen(labels[i]), &sz);
-            SetTextColor(dc, sel ? RGB(255, 255, 255) : RGB(196, 204, 198));
+            SetTextColor(dc, sel ? on : cart::kInk);
             TextOutA(dc, x + (bw - (int)sz.cx) / 2, y + (bh - (int)sz.cy) / 2, labels[i], (int)strlen(labels[i]));
         }
         SelectObject(dc, small);
-        SetTextColor(dc, RGB(140, 150, 144));
+        SetTextColor(dc, cart::kSoft);
         const char* hint = ask_quit ? "Left/Right choose   Enter confirms   Esc: Back" : "Left/Right choose   Enter confirms   Esc: Later";
         TextOutA(dc, 16 * s, 168 * s, hint, (int)strlen(hint));
         SelectObject(dc, old);
@@ -1643,282 +2917,9 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
         DeleteObject(body);
         return;
     }
-    if (page == 1) {   // (relink) the Controls page
-        TextOutA(dc, 16 * s + 110 * s, 12 * s + 4 * s, "Controls", 8);
-        const int rh = menu_hit::kCtlRowH * s, top = menu_hit::kCtlTop * s, xpad = menu_hit::kCtlPad * s,
-                  xkey = menu_hit::kCtlKey * s;
-        SetTextColor(dc, RGB(140, 150, 144));
-        TextOutA(dc, 16 * s, 44 * s, "Button", 6);
-        TextOutA(dc, xpad, 44 * s, "Gamepad", 7);
-        TextOutA(dc, xkey, 44 * s, "Keyboard", 8);
-        for (int i = 0; i <= kControls; i++) {
-            const int y = top + i * rh;
-            const bool sel = i == csel;
-            if (sel) startup_gdi::round_rect(dc, 8 * s, y, (int)w - 16 * s, rh, 6 * s, RGB(44, 72, 54));
-            SetTextColor(dc, sel ? RGB(255, 255, 255) : RGB(196, 204, 198));
-            if (i == kControls) {
-                const char* t = "Reset to defaults";
-                TextOutA(dc, 16 * s, y + 3 * s, t, (int)strlen(t));
-                continue;
-            }
-            const Control& c = controls[i];
-            TextOutA(dc, 16 * s, y + 3 * s, c.name, (int)strlen(c.name));
-            for (int col = 0; col < 2; col++) {
-                std::string v = col == 0 ? (keys_only(i) ? "-" : pad_name(host->binding(HOS_BIND_PAD, c.button, 0)))
-                                         : keys_text(c.button);
-                if (sel && col == ccol && listening) v = col == 0 ? "Press a button..." : "Press a key...";
-                if (sel && col == ccol) {
-                    SIZE sz{};
-                    GetTextExtentPoint32A(dc, v.c_str(), (int)v.size(), &sz);
-                    fill(dc, (col ? xkey : xpad) - menu_hit::kCtlCellPad * s, y + 2 * s, (int)sz.cx + 12 * s, rh - 4 * s,
-                         listening ? RGB(150, 120, 40) : RGB(70, 120, 84));
-                }
-                TextOutA(dc, col ? xkey : xpad, y + 3 * s, v.c_str(), (int)v.size());
-            }
-        }
-        SetTextColor(dc, RGB(140, 150, 144));
-        const char* hint = listening ? "Press the new one   Esc cancels"
-                                     : "Enter binds   Delete clears   Esc goes back";
-        const char* hint2 = "Gamepad: D-pad moves, bottom button binds, right one goes back";
-        TextOutA(dc, 16 * s, top + (kControls + 1) * rh + 6 * s, hint, (int)strlen(hint));
-        TextOutA(dc, 16 * s, top + (kControls + 1) * rh + 26 * s, hint2, (int)strlen(hint2));
-        SelectObject(dc, old);
-        DeleteObject(title);
-        DeleteObject(body);
-        return;
-    }
-    if (page == 3 || page == 4) {   // the teleport list and the inventory: a heading line per section, then its rows
-        const bool inv = page == 4;
-        const int n = inv ? kItems : kTeleports, sections = inv ? kItemSections : kTeleportSections;
-        const TeleportSection* sec = inv ? item_sections.s : teleport_sections;
-        const int choice = inv ? item_choice : teleport_choice, scroll = inv ? item_scroll : teleport_scroll;
-        const int rh = menu_hit::kListRowH * s, top = menu_hit::kListTop * s;
-        for (int line = scroll; line < std::min(n + sections, scroll + kTeleportLines); line++) {
-            const int y = top + (line - scroll) * rh;
-            list_value_l[line - scroll] = (int)w;
-            int section = 0;
-            while (section + 1 < sections && line >= sec[section + 1].first + section + 1) section++;
-            if (line == sec[section].first + section) {
-                SetTextColor(dc, RGB(96, 176, 112));
-                TextOutA(dc, 16 * s, y + 4 * s, sec[section].name, (int)strlen(sec[section].name));
-                continue;
-            }
-            const int i = line - section - 1;
-            if (i == choice) startup_gdi::round_rect(dc, 8 * s, y, (int)w - 16 * s, rh, 6 * s, RGB(44, 72, 54));
-            SetTextColor(dc, i == choice ? RGB(255, 255, 255) : RGB(196, 204, 198));
-            const char* label = inv ? item_names[i] : teleport_names[i];
-            TextOutA(dc, 32 * s, y + 3 * s, label, (int)strlen(label));
-            char value[24] = "";
-            const char* note = nullptr;
-            if (inv) {
-                const int have = item_counts[i].load(std::memory_order_relaxed);
-                if (have < 0) note = "?";
-                else if (item_kinds[i]) snprintf(value, sizeof value, "%d", have), note = value;
-                else note = have > 0 ? "Have" : "-";
-            } else note = teleport_notes[i];
-            if (note) {
-                SIZE size{};
-                GetTextExtentPoint32A(dc, note, (int)strlen(note), &size);
-                if (!inv || strcmp(note, "Have")) SetTextColor(dc, RGB(140, 150, 144));
-                list_value_l[line - scroll] = (int)w - menu_hit::kListValueRight * s - (int)size.cx;
-                TextOutA(dc, list_value_l[line - scroll], y + 3 * s, note, (int)strlen(note));
-            }
-        }
-        SetTextColor(dc, RGB(140, 150, 144));
-        char count[32];
-        snprintf(count, sizeof count, "%d of %d", choice + 1, n);
-        SIZE size{};
-        GetTextExtentPoint32A(dc, count, (int)strlen(count), &size);
-        TextOutA(dc, (int)w - 16 * s - size.cx, 22 * s, count, (int)strlen(count));
-        const int bottom = top + kTeleportLines * rh + 8 * s;
-        const char* hint = inv ? "Up/Down choose   Enter unlocks or relocks   Left/Right amount"
-                               : "Up/Down choose   Left/Right next section   Enter travels   Esc back";
-        TextOutA(dc, 16 * s, bottom, hint, (int)strlen(hint));
-        const char* hint2 = inv ? "Q/E or bumpers: next section   PgUp/PgDn/Home/End jump   Esc back"
-                                : "PgUp/PgDn/Home/End jump. Link arrives at the map's own entrance.";
-        TextOutA(dc, 16 * s, bottom + 20 * s, hint2, (int)strlen(hint2));
-        SelectObject(dc, old);
-        DeleteObject(title);
-        DeleteObject(body);
-        return;
-    }
-    if (page == 2) {
-        const char* labels[] = {"Heart protection", "No-clip flight", "Mark position",
-                                "Return to mark", "Set time", "Inventory item", "Change quantity", "Free camera",
-                                "Teleport", "Switch age", "Inventory", "Travel"};
-        char clock_text[12], quantity[12];
-        snprintf(clock_text, sizeof clock_text, "%02d:00", clock_hour);
-        snprintf(quantity, sizeof quantity, "%+d", pouch_delta);
-        const char* values[] = {tx_onoff(protect_hearts.load() == 1), tx_onoff(player_flight.load() >= 0),
-                                "", "", clock_text, pouch_items[pouch_item], quantity, tx_onoff(free_camera.load()),
-                                teleport_names[teleport_choice], "", "", ""};
-        const char* help[] = {"Protects Link's hearts. Hits can still knock him back.",
-            "Enable double-tap Jump for takeoff and landing. Hold Jump to climb or L to descend.",
-            "Remember Link's position for this loaded scene.",
-            "Teleport Link to the marked position in the current scene.",
-            "Choose an hour with Left or Right. Enter sets the world clock.",
-            "Choose a consumable with Left or Right.",
-            "Choose how many to add or remove. Enter applies the change.",
-            "Move and look with your usual controls. Page Up / Page Down or R / L changes height.",
-            "Enter opens the map list (Left or Right also changes the map here). Link travels through the game's own map change, in his current age.",
-            "Swaps Link between child and adult and reloads this map in the other age (the Market when this map has no match).",
-            "Enter opens the inventory editor: unlock or relock equipment, items, upgrades and quest items, and change amounts.",
-            "Go to a place you know: villages, dungeons' entrances, shops, warps. Each with a picture from your own game."};
-        for (int i = 0; i < kCheatRows; i++) {
-            const int y = (menu_hit::kCheatTop + i * menu_hit::kCheatRowH) * s;
-            if (i == cheat_selected) startup_gdi::round_rect(dc, 8 * s, y, (int)w - 16 * s, menu_hit::kCheatRowH * s, 6 * s, RGB(44, 72, 54));
-            SetTextColor(dc, i == cheat_selected ? RGB(255, 255, 255) : RGB(196, 204, 198));
-            TextOutA(dc, 16 * s, y + 4 * s, labels[i], (int)strlen(labels[i]));
-            const char* value = values[i];
-            SIZE size{};
-            GetTextExtentPoint32A(dc, value, (int)strlen(value), &size);
-            cheat_value_l[i] = *value ? (int)w - menu_hit::kListValueRight * s - (int)size.cx : (int)w;
-            TextOutA(dc, (int)w - menu_hit::kListValueRight * s - size.cx, y + 4 * s, value, (int)strlen(value));
-        }
-        SetTextColor(dc, RGB(176, 186, 180));
-        wrap_help(dc, help[cheat_selected], (int)w - 32 * s, 16 * s, (54 + kCheatRows * 28) * s, true);
-        const char* hint = "Enter applies   Esc goes back";
-        TextOutA(dc, 16 * s, (105 + kCheatRows * 28) * s, hint, (int)strlen(hint));
-        SelectObject(dc, old);
-        DeleteObject(title);
-        DeleteObject(body);
-        return;
-    }
-    // the tab strip: Graphics, Gameplay, Controls (Q and E, the bumpers or Tab change it: menu_tick)
-    const int tab_y = menu_hit::kTabY * s;
-    const int tab_h = menu_hit::kTabH * s;
-    fill(dc, 0, tab_y, (int)w, tab_h, RGB(22, 28, 25));
-    HFONT small_font = font(12 * s, FW_SEMIBOLD);
-    SelectObject(dc, small_font);
-    SetTextColor(dc, hover_tab == 3 ? RGB(210, 225, 215) : RGB(110, 135, 120));   // (lighter under the cursor: a click goes there)
-    TextOutA(dc, 16 * s, tab_y + 8 * s, "[Q / LB]", 8);
-    const char* rb_hint = "[E / RB]";
-    SIZE rbsz{};
-    GetTextExtentPoint32A(dc, rb_hint, (int)strlen(rb_hint), &rbsz);
-    SetTextColor(dc, hover_tab == 4 ? RGB(210, 225, 215) : RGB(110, 135, 120));
-    TextOutA(dc, (int)w - 16 * s - rbsz.cx, tab_y + 8 * s, rb_hint, (int)strlen(rb_hint));
-    HFONT tab_font = font(13 * s, FW_BOLD);
-    SelectObject(dc, tab_font);
-    const char* const tab_titles[TAB_COUNT] = {"GRAPHICS", "GAMEPLAY", "CONTROLS"};
-    const int center_start = menu_hit::kTabSide * s;
-    const int tab_slot_w = menu_hit::tab_slot_w(s, (int)w);
-    for (int t = 0; t < TAB_COUNT; t++) {
-        const bool active = (t == cur_tab);
-        int slot_x = center_start + t * tab_slot_w;
-        SIZE tsz{};
-        GetTextExtentPoint32A(dc, tab_titles[t], (int)strlen(tab_titles[t]), &tsz);
-        int text_x = slot_x + (tab_slot_w - tsz.cx) / 2;
-        int text_y = tab_y + 8 * s;
-        if (active) {   // (a pill behind it and a golden underline)
-            fill(dc, text_x - 10 * s, tab_y + 3 * s, tsz.cx + 20 * s, tab_h - 6 * s, RGB(38, 64, 48));
-            fill(dc, text_x - 10 * s, tab_y + tab_h - 2 * s, tsz.cx + 20 * s, 2 * s, RGB(235, 205, 95));
-            SetTextColor(dc, RGB(255, 255, 255));
-        } else if (t == hover_tab) {   // (under the cursor: a dimmer pill)
-            fill(dc, text_x - 10 * s, tab_y + 3 * s, tsz.cx + 20 * s, tab_h - 6 * s, RGB(30, 46, 37));
-            SetTextColor(dc, RGB(215, 225, 218));
-        } else {
-            SetTextColor(dc, RGB(135, 150, 142));
-        }
-        TextOutA(dc, text_x, text_y, tab_titles[t], (int)strlen(tab_titles[t]));
-    }
-    SelectObject(dc, body);
-    DeleteObject(tab_font);
-    DeleteObject(small_font);
-    fill(dc, 0, tab_y + tab_h, (int)w, std::max(1, s), RGB(52, 68, 58));
-
-    const int rh = menu_hit::kRowH * s, top = menu_hit::rows_top(s);
-    const int tab_count = tab_row_count(cur_tab);
-    marquee_max = 0;   // (set again below while the selected row's value is too long)
-    for (int i = 0; i < tab_count; i++) {
-        const Row& r = rows[tab_row_to_global(cur_tab, i)];
-        const int y = top + i * rh;
-        const bool sel = i == tab_selected[cur_tab];
-        if (sel) {
-            startup_gdi::round_rect(dc, 8 * s, y, (int)w - 16 * s, rh, 6 * s, RGB(44, 72, 54));
-            startup_gdi::round_fill(dc, 10 * s, y + 6 * s, 3 * s, rh - 12 * s, RGB(104, 186, 124));   // (a green marker at its left)
-        }
-        SetTextColor(dc, sel ? RGB(255, 255, 255) : RGB(196, 204, 198));
-        TextOutA(dc, 18 * s, y + 4 * s, r.name, (int)strlen(r.name));
-        // (the value right-aligned, kept clear of the row's name: see marquee_pos)
-        SIZE nsz{};
-        GetTextExtentPoint32A(dc, r.name, (int)strlen(r.name), &nsz);
-        const int room = (int)w - 18 * s - (18 * s + (int)nsz.cx + 12 * s);
-        std::string label = r.value ? r.text(*r.value) : ">";   // (">": a page)
-        if (r.value && r.restart && *r.value != restart_state.start[restart_slot_of(r)]) label += " (after restart)";
-        const bool arrows = r.value && sel && !row_fixed(r.value);
-        auto width = [&](const std::string& t) {
-            SIZE z{};
-            GetTextExtentPoint32A(dc, t.c_str(), (int)t.size(), &z);
-            return (int)z.cx;
-        };
-        const bool output_row = r.value == &opts.output_res;
-        const bool left_arrow = arrows && (!output_row || step_output_choice(*r.value, -1) != *r.value);
-        const bool right_arrow = arrows && (!output_row || step_output_choice(*r.value, 1) != *r.value);
-        auto framed = [&](const std::string& t) {
-            return arrows ? (left_arrow ? "<  " : "   ") + t + (right_arrow ? "  >" : "   ") : t;
-        };
-        std::string v = framed(label);
-        if (width(v) > room && arrows) {   // (slides: the longest piece from marquee_pos that fits)
-            size_t start = label.size();   // (the last start that still shows the name's end)
-            while (start > 0 && width(framed(label.substr(start - 1))) <= room) start--;
-            marquee_max = (int)start;
-            const size_t from = (size_t)std::min(marquee_pos, marquee_max);
-            size_t n = label.size() - from;
-            while (n > 1 && width(framed(label.substr(from, n))) > room) n--;
-            v = framed(label.substr(from, n));
-        } else if (width(v) > room) {   // (not selected: cut with "...")
-            std::string t = label;
-            while (t.size() > 1 && width(v) > room) {
-                t.pop_back();
-                while (!t.empty() && t.back() == ' ') t.pop_back();
-                v = t + "...";
-            }
-        } else if (arrows) {
-            marquee_max = 0;
-        }
-        TextOutA(dc, (int)w - 18 * s - width(v), y + 4 * s, v.c_str(), (int)v.size());
-        // (the mouse's: where the value is, its arrows counted whether they show or not, so a click's half does not move
-        // as the row is selected)
-        row_value_l[i] = (int)w - 18 * s - std::min(r.value ? width("<  " + label + "  >") : width(v), room);
-        // (a slider's track between the name and the value, with a knob at the value: click or drag it)
-        const int tl = menu_hit::kSliderL * s, tr = menu_hit::kSliderR * s;
-        row_slider[i] = is_slider(r) && 18 * s + (int)nsz.cx + 8 * s <= tl && row_value_l[i] >= tr + 8 * s;
-        if (row_slider[i]) {
-            const int ty = y + rh / 2 - s, knob = tl + (tr - tl) * menu_hit::slider_permille(*r.value, r.lo, r.hi) / 1000;
-            fill(dc, tl, ty, tr - tl, 2 * s, RGB(60, 80, 68));
-            fill(dc, tl, ty, knob - tl, 2 * s, RGB(96, 210, 120));
-            fill(dc, knob - 3 * s, y + rh / 2 - 6 * s, 6 * s, 12 * s, sel ? RGB(255, 255, 255) : RGB(176, 186, 180));
-        }
-    }
-    const int help_top = top + max_tab_rows() * rh + 8 * s;   // (the same height whichever tab is shown)
-    fill(dc, 16 * s, help_top - 4 * s, (int)w - 32 * s, std::max(1, s), RGB(52, 64, 56));
-    HFONT help = font(14 * s, FW_NORMAL);
-    SelectObject(dc, help);
-    SetTextColor(dc, RGB(176, 186, 180));
-    {   // (what the row is, then on a line of its own, set off by a bar, what its value does: measure_help keeps the room)
-        const Row& r = rows[tab_row_to_global(cur_tab, tab_selected[cur_tab])];
-        const int about = wrap_help(dc, r.help, (int)w - 32 * s, 16 * s, help_top + 4 * s, true);
-        if (const char* hint = r.value && r.hint ? r.hint(*r.value, -1) : nullptr) {
-            const int y = help_top + 4 * s + about + kHintGap * s;
-            SetTextColor(dc, RGB(150, 166, 156));
-            const int tall = wrap_help(dc, hint, (int)w - (32 + kHintIndent) * s, (16 + kHintIndent) * s, y, true);
-            fill(dc, 16 * s, y + 2 * s, 2 * s, tall - 4 * s, RGB(96, 176, 112));
-        }
-    }
-    SelectObject(dc, body);
-    SetTextColor(dc, RGB(140, 150, 144));
-    const char* hint = "Arrows change   Q/E or LB/RB: tabs   Insert, F1 or Home closes";   // (fits 448 px at 16 px)
-    TextOutA(dc, 16 * s, help_top + 4 * s + help_px + 10 * s, hint, (int)strlen(hint));
-    if (cur_tab == TAB_GRAPHICS && restart_pending()) {   // (the rows that take a restart, changed: measure_pending's room)
-        SelectObject(dc, help);
-        SetTextColor(dc, RGB(235, 205, 95));
-        const std::string line = restart_line(dc, (int)w - 32 * s);
-        TextOutA(dc, 16 * s, help_top + 4 * s + help_px + 34 * s, line.c_str(), (int)line.size());
-    }
-    SelectObject(dc, old);
+    SelectObject(dc, old);   // (page 0, the options, is paint_options')
     DeleteObject(title);
     DeleteObject(body);
-    DeleteObject(help);
 }
 char fps_text[48] = "";
 char fps_sub[32] = "";
@@ -1938,12 +2939,16 @@ HFONT hard_font(int px, int weight) {
 }
 /// (relink) The Travel page's notice over the game: a picture was saved
 void paint_notice(HDC dc, uint32_t w, uint32_t h, int s) {
-    fill(dc, 0, 0, (int)w, (int)h, RGB(16, 20, 18));
-    fill(dc, 0, 0, (int)w, 2 * s, RGB(96, 176, 112));
+    // (relink) a small label of the cartridge: the shell's edge, the cream, a green strip at its left (see-through corners)
+    fill(dc, 0, 0, (int)w, (int)h, RGB(0, 0, 0));
+    startup_gdi::round_rect(dc, 0, 0, (int)w, (int)h, 8 * s, cart::kShell);
+    startup_gdi::round_rect(dc, 3 * s, 3 * s, (int)w - 6 * s, (int)h - 6 * s, 6 * s, cart::kLabel);
+    startup_gdi::round_rect(dc, 3 * s, 3 * s, 12 * s, (int)h - 6 * s, 6 * s, cart::kTabs[1].strip);
+    fill(dc, 9 * s, 3 * s, 6 * s, (int)h - 6 * s, cart::kLabel);
     SetBkMode(dc, TRANSPARENT);
     HFONT f = font(16 * s, FW_SEMIBOLD);
     HGDIOBJ old = SelectObject(dc, f);
-    SetTextColor(dc, RGB(236, 240, 236));
+    SetTextColor(dc, cart::kInk);
     SIZE sz{};
     GetTextExtentPoint32A(dc, notice_text, (int)strlen(notice_text), &sz);
     TextOutA(dc, ((int)w - (int)sz.cx) / 2, ((int)h - (int)sz.cy) / 2 + s, notice_text, (int)strlen(notice_text));
@@ -1969,64 +2974,39 @@ void paint_fps(HDC dc, uint32_t w, uint32_t h, int s) {
     DeleteObject(label);
     DeleteObject(big);
 }
-/// The tallest help text at scale s, a row's help and its value's line, in pixels: the menu keeps that height whichever
-/// row is selected and whatever its value
-int measure_help(int s) {
-    HDC dc = CreateCompatibleDC(nullptr);
-    HFONT f = font(14 * s, FW_NORMAL);
-    HGDIOBJ old = SelectObject(dc, f);
-    int most = 0;
-    for (const Row& r : rows) {   // (the row's help, and the tallest line any of its values can have)
-        int hint = 0;
-        for (int v = r.lo; r.value && r.hint && v <= r.hi; v++)
-            for (int k = 0; const char* t = r.hint(v, k); k++)
-                hint = std::max(hint, wrap_help(dc, t, (kMenuWidth - 32 - kHintIndent) * s, 0, 0, false));
-        most = std::max(most, wrap_help(dc, r.help, (kMenuWidth - 32) * s, 0, 0, false) + (hint ? kHintGap * s + hint : 0));
-    }
-    SelectObject(dc, old);
-    DeleteObject(f);
-    DeleteDC(dc);
-    return most;
-}
-/// The Graphics tab's "Restart needed" line, one line high (the room measure_pending keeps)
-int pending_px = 0;
-int measure_pending(int s) {
-    HDC dc = CreateCompatibleDC(nullptr);
-    HFONT f = font(14 * s, FW_NORMAL);
-    HGDIOBJ old = SelectObject(dc, f);
-    SIZE sz{};
-    GetTextExtentPoint32A(dc, "Ag", 2, &sz);
-    SelectObject(dc, old);
-    DeleteObject(f);
-    DeleteDC(dc);
-    return (int)sz.cy;
-}
 void redraw_menu(int s) {
-    if (page == 6) {   // (relink) the Travel page: the list and the picture
-        gdi_draw(menu_bmp, kTravelWidth * s, (100u + kTeleportLines * (unsigned)menu_hit::kListRowH) * s, paint_menu, s);
+    if (page == 6) {   // (relink) the Travel page: the list and the picture, as the Cheats page's cartridge
+        uint32_t mw = 0, mh = 0;
+        travel_size(dev.swap_extent.width, dev.swap_extent.height, &mw, &mh);
+        gdi_draw(menu_bmp, mw, mh, paint_menu, s);
         return;
     }
     if (page == 5) {
         gdi_draw(menu_bmp, kMenuWidth * s, (unsigned)menu_hit::kAskHeight * s, paint_menu, s);
         return;
     }
-    if (page == 3 || page == 4) {
-        gdi_draw(menu_bmp, kMenuWidth * s, (100u + kTeleportLines * (unsigned)menu_hit::kListRowH) * s, paint_menu, s);
+    if (page == 3 || page == 4) {   // (relink: the Teleport and Inventory pages, as the Cheats page)
+        uint32_t mw = 0, mh = 0;
+        list_size(dev.swap_extent.width, dev.swap_extent.height, page == 4, &mw, &mh);
+        gdi_draw(menu_bmp, mw, mh, paint_menu, s);
         return;
     }
-    if (page == 2) {
-        gdi_draw(menu_bmp, kMenuWidth * s, (136u + kCheatRows * (unsigned)menu_hit::kCheatRowH) * s, paint_menu, s);
+    if (page == 2) {   // (relink: the Cheats page, as the options' cartridge)
+        uint32_t mw = 0, mh = 0;
+        cheats_size(dev.swap_extent.width, dev.swap_extent.height, &mw, &mh);
+        gdi_draw(menu_bmp, mw, mh, paint_menu, s);
         return;
     }
-    if (page == 1) {
-        gdi_draw(menu_bmp, 600u * s, (uint32_t)((64 + (kControls + 1) * 24 + 52) * s), paint_menu, s);
+    if (page == 1) {   // (relink) the bindings, as the Controls tab's cartridge
+        uint32_t mw = 0, mh = 0;
+        controls_size(dev.swap_extent.width, dev.swap_extent.height, &mw, &mh);
+        gdi_draw(menu_bmp, mw, mh, paint_menu, s);
         return;
     }
-    static int measured_at = 0;
-    if (measured_at != s) help_px = measure_help(s), pending_px = measure_pending(s), measured_at = s;
-    // (title, the tab strip, the most rows a tab has, the rule and the help text, the hint line, the restart line)
-    gdi_draw(menu_bmp, (uint32_t)(kMenuWidth * s),
-             (uint32_t)((44 + 32 + 8 + max_tab_rows() * 28 + 8 + 10 + 30 + 6) * s + help_px + pending_px), paint_menu, s);
+    // (relink) the options page: the cartridge (paint_options), its round corners see-through
+    uint32_t mw = 0, mh = 0;
+    options_size(dev.swap_extent.width, dev.swap_extent.height, &mw, &mh);
+    gdi_draw(menu_bmp, mw, mh, paint_menu, s);
 }
 
 std::atomic<int64_t> game_frames{0}, shown_frames{0};
@@ -2116,7 +3096,8 @@ void startup_screen(const StartupView* view) {
     // (the picture moves: drawn again 30 times a second up to 1080 lines, 15 up to 1440, 10 above. Each drawing is the window's
     // pixels copied three times and sent to the card, and the start's own work has the processor)
     const uint64_t pixels = (uint64_t)w * h;
-    const double every = pixels > 4200000 ? 0.099 : pixels > 2300000 ? 0.066 : 0.033;
+    // (the ending, outro, each time it is asked, about 60 a second: the work is done then, and the closing must be smooth)
+    const double every = v.outro >= 0 ? 0 : pixels > 4200000 ? 0.099 : pixels > 2300000 ? 0.066 : 0.033;
     StartupView still = v, was = startup;
     still.anim = was.anim = 0;
     if (w && h && (w != drawn_w || h != drawn_h || !(still == was) || v.anim < drawn_at || v.anim - drawn_at >= every - 0.004)) {
@@ -2127,6 +3108,11 @@ void startup_screen(const StartupView* view) {
     startup_on.store(true, std::memory_order_release);
 }
 
+int hotkey_vk(int index) { return index >= 0 && index < kHotkeyNone ? kHotkeys[index] : 0; }
+int hdr_paper_white_nits() {
+    static const int env = getenv("HOS_HDR_PAPER_WHITE") && *getenv("HOS_HDR_PAPER_WHITE") ? atoi(getenv("HOS_HDR_PAPER_WHITE")) : 0;
+    return std::clamp(env > 0 ? env : opts.hdr_paper_white, 80, 500);
+}
 void menu_init() {
     static bool done;
     if (done) return;
@@ -2134,7 +3120,7 @@ void menu_init() {
     for (auto& count : item_counts) count.store(-1, std::memory_order_relaxed);
     bool has_options = false;
     const char* cheats = getenv("HOS_OOT_CHEATS");
-    cheats_enabled = cheats && !strcmp(cheats, "1");
+    cheats_enabled = !cheats || strcmp(cheats, "0") != 0;   // (relink: shown unless HOS_OOT_CHEATS=0 hides them)
     if (cheats_enabled) {   // (relink) the Travel page's pictures: taken when the page was opened before (its folder is there),
         // and only while the page can be opened: it is on the Cheats page
         std::error_code ec;
@@ -2163,6 +3149,7 @@ void menu_init() {
             has_resolution |= !strcmp(line, "resolution");
             v2 |= !strcmp(line, "options_version");
             if (!strcmp(line, "dynamic_resolution")) old_dynres = atoi(eq + 1);
+            if (!strcmp(line, "hdr_paper_white")) opts.hdr_paper_white = std::clamp(atoi(eq + 1), 80, 500);   // (relink: HDR)
             if (!strcmp(line, "microphone_device")) {   // (relink: the microphone, by its name)
                 mic_want = mic_key(eq + 1);
                 while (!mic_want.empty() && (mic_want.back() == '\n' || mic_want.back() == '\r')) mic_want.pop_back();
@@ -2349,27 +3336,25 @@ void menu_option_set(int id, int value) {
     save();
 }
 
-/// A list page's line (from the top of the list, headings included) to its item: -1 a section's heading
-int list_item(int line, const TeleportSection* sec, int sections) {
-    int section = 0;
-    while (section + 1 < sections && line >= sec[section + 1].first + section + 1) section++;
-    return line == sec[section].first + section ? -1 : line - section - 1;
-}
-/// (relink) the mouse on a list page (the teleport list, the inventory): the item under the cursor chosen, a click on it
-/// as Enter (on an amount's left or right half, with amounts, as Left or Right), the wheel moves the choice, a right click
-/// goes back
-void list_mouse(const MkwVkPointer& ptr, int mx, int my, int mw, int mh, int scale, bool moved, bool amounts, int n,
-                int sections, const TeleportSection* sec, int scroll, int& choice, bool* press, bool& changed) {
-    const int shown = std::min(n + sections - scroll, kTeleportLines);
-    const menu_hit::Hit hit = menu_hit::list_lines(mx, my, scale, mw, mh, shown, list_value_l);
-    const int item = hit.part == menu_hit::kListLine ? list_item(scroll + hit.index, sec, sections) : -1;
-    if (item >= 0 && (moved || ptr.pressed) && item != choice) choice = item, changed = true;
-    if ((ptr.pressed & HOS_MOUSE_LEFT) && item >= 0) {
-        if (amounts && item_kinds[item] && hit.side != 0) press[hit.side < 0 ? 3 : 4] = true;
+/// (relink) The mouse over the Teleport or Inventory page: where paint_list put each line (list_hit). The line under it chosen,
+/// a click as Enter, or on an amount's left or right half as Left or Right; the wheel moves the choice; a right click goes back
+void list_mouse_cart(const MkwVkPointer& ptr, int mx, int my, int mw, int mh, bool moved, bool amounts, int n, int& choice, bool* press,
+                     bool& changed) {
+    const int grab = (int)std::lround(6 * opt_u);
+    const bool inside = mx >= 0 && my >= 0 && mx < mw && my < mh;
+    const bool on_bar = scroll_mouse(list_sc[amounts], ptr, mx, my, mw, mh, opt_u, changed);   // (amounts: the inventory's)
+    int over = -1, side = 0;
+    if (inside && !on_bar && my >= list_hit.body_top && my < list_hit.body_bottom)
+        for (int i = 0; i < n && i < list_hit.n; i++)
+            if (my >= list_hit.top[i] && my < list_hit.bottom[i]) over = i;
+    if (over >= 0 && mx >= list_hit.value_l[over] && mx < list_hit.value_r[over] + grab)
+        side = mx < (list_hit.value_l[over] + list_hit.value_r[over]) / 2 ? -1 : 1;
+    if (over >= 0 && (moved || ptr.pressed) && over != choice) choice = over, changed = true;
+    if ((ptr.pressed & HOS_MOUSE_LEFT) && over >= 0) {
+        if (amounts && item_kinds[over] && side != 0) press[side < 0 ? 3 : 4] = true;
         else press[7] = true;
     }
     if (ptr.pressed & HOS_MOUSE_RIGHT) press[5] = true;
-    if (ptr.wheel) choice = std::clamp(choice - ptr.wheel, 0, n - 1), changed = true;
 }
 /// Scrolls the teleport list so the chosen map (and its section heading, at the top) is in view
 void teleport_reveal() {
@@ -2393,12 +3378,27 @@ void item_reveal() {
 }
 void menu_tick() {
     fullscreen_tick();
+    {   // (relink) V-Sync changed: the swapchain made again at its next present, in the mode it now asks for (vk_main.cpp)
+        static int applied = -1;
+        if (applied < 0) applied = opts.vsync;
+        else if (opts.vsync != applied && dev.swap_extent.width && dev.swap_extent.height) {
+            applied = opts.vsync;
+            logf("menu: V-Sync %s", opts.vsync ? "on" : "off");
+            dev.swap_resize.store((uint64_t)dev.swap_extent.width << 32 | dev.swap_extent.height, std::memory_order_release);
+        }
+    }
     enum { K_N = 17 };
     static bool held[K_N];
-    static const int keys[K_N] = {VK_INSERT, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_ESCAPE, VK_F1,   // (F1: for keyboards without Insert)
-                                  VK_RETURN, VK_DELETE, VK_BACK,
-                                  'Q', 'E', VK_TAB,   // (the tabs: Q and E, Tab and Shift+Tab)
-                                  VK_PRIOR, VK_NEXT, VK_HOME, VK_END};   // (the long lists: a page, the ends)
+    static int keys[K_N] = {VK_INSERT, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_ESCAPE, VK_F1,   // (F1: for keyboards without Insert)
+                            VK_RETURN, VK_DELETE, VK_BACK,
+                            'Q', 'E', VK_TAB,   // (the tabs: Q and E, Tab and Shift+Tab)
+                            VK_PRIOR, VK_NEXT, VK_HOME, VK_END};   // (the long lists: a page, the ends)
+    {   // (relink) the Menu key row; F1 as well unless another of ReLink's keys is F1 (then a key nothing is: Insert's place
+        // left as it is would open the menu twice when the Menu key row is Insert)
+        const int menu = hotkey_vk(opts.key_menu), f1_taken = hotkey_vk(opts.key_shot) == VK_F1 || hotkey_vk(opts.key_full) == VK_F1;
+        keys[0] = menu ? menu : VK_INSERT;
+        keys[6] = keys[0] == VK_F1 || f1_taken ? 0xFF : VK_F1;   // (0xFF: no key)
+    }
     HWND fg = GetForegroundWindow();
     DWORD pid = 0;
     if (fg) GetWindowThreadProcessId(fg, &pid);
@@ -2412,7 +3412,7 @@ void menu_tick() {
     }
     // (relink) F12: a screenshot of the game's picture (vk_screenshot.h), menu open or not; not while a control waits for
     // its key in the menu (the key is that control's then)
-    if (host && host->take_key_press && host->take_key_press(VK_F12) && mine && !listening)
+    if (hotkey_vk(opts.key_shot) && host && host->take_key_press && host->take_key_press(hotkey_vk(opts.key_shot)) && mine && !listening)
         screenshot_want.store(true, std::memory_order_relaxed);
     // (relink) the gamepads, by position: Home, or Select and Start together, as Insert; the D-pad as the arrows,
     // the bottom face button as Enter, the right one as Esc (not while a binding waits for its button)
@@ -2498,6 +3498,7 @@ void menu_tick() {
         page = 5, ask_sel = 0, ask_quit = false, listening = 0, changed = true;
     } else if (press[0] || press[6]) {
         open_now = !open_now.load(), changed = true;
+        for (Scroller* sc : {&opt_sc, &cheat_sc, &list_sc[0], &list_sc[1], &travel_sc, &controls_sc}) sc->reveal = true, sc->drag = -1;
         page = 0, listening = 0;
         // (the layout row shows the controls as they are: host/nn_hid.c keeps them, the ini's pad_ lines, and a saved
         // layout is not applied over them at start)
@@ -2564,20 +3565,25 @@ void menu_tick() {
         } else {
             if (mouse) {   // (the mouse: the row under it selected, a click on a binding listens for its new input, on
                            // Reset resets; the wheel moves the selection, a right click goes back)
-                const menu_hit::Hit hit = menu_hit::controls(mx, my, scale, mw, mh, kControls);
-                const bool on = hit.part == menu_hit::kCtlRow || hit.part == menu_hit::kCtlCell;
-                if (on && (moved || ptr.pressed)) {
-                    if (hit.index != csel) csel = hit.index, changed = true;
-                    if (hit.part == menu_hit::kCtlCell && !keys_only(csel) && ccol != hit.side) ccol = hit.side, changed = true;
+                // (where paint_controls_cart put each row and column: controls_hit)
+                const ControlsHit& ch = controls_hit;
+                const bool inside = mx >= 0 && my >= 0 && mx < mw && my < mh;
+                const bool on_bar = scroll_mouse(controls_sc, ptr, mx, my, mw, mh, opt_u, changed);
+                int over = -1, col = -1;
+                if (inside && !on_bar && my >= ch.body_top && my < ch.body_bottom)
+                    for (int i = 0; i <= kControls; i++)
+                        if (my >= ch.top[i] && my < ch.bottom[i]) over = i;
+                if (over >= 0 && over < kControls) col = mx >= ch.key_l && mx < ch.key_r ? 1 : mx >= ch.pad_l && mx < ch.pad_r ? 0 : -1;
+                const bool on_reset = over == kControls && mx >= ch.reset_l && mx < ch.reset_r;
+                if (over >= 0 && (moved || ptr.pressed)) {
+                    if (over != csel) csel = over, changed = true;
+                    if (col >= 0 && !keys_only(csel) && ccol != col) ccol = col, changed = true;
                 }
-                if (ptr.pressed & HOS_MOUSE_LEFT) {
-                    if (hit.part == menu_hit::kCtlCell || (hit.part == menu_hit::kCtlRow && hit.index == kControls))
-                        press[7] = true;   // (as Enter)
-                }
+                if ((ptr.pressed & HOS_MOUSE_LEFT) && (col >= 0 || on_reset)) press[7] = true;   // (as Enter)
                 if (ptr.pressed & HOS_MOUSE_RIGHT) press[5] = true;
-                if (ptr.wheel) csel = ((csel - ptr.wheel) % (kControls + 1) + kControls + 1) % (kControls + 1), changed = true;
             }
             if (press[5]) page = 0, changed = true;
+            if (press[1] || press[2]) controls_sc.reveal = true;
             if (press[1]) csel = (csel + kControls) % (kControls + 1), changed = true;
             if (press[2]) csel = (csel + 1) % (kControls + 1), changed = true;
             if ((press[3] || press[4]) && csel < kControls && !keys_only(csel)) ccol ^= 1, changed = true;
@@ -2605,26 +3611,36 @@ void menu_tick() {
     } else if (open_now.load() && page == 2) {
         // (the Cheats rows that choose with Left and Right: Set time, Inventory item, Change quantity, Teleport)
         auto chooses = [](int row) { return row == 4 || row == 5 || row == 6 || row == 8; };
-        if (mouse) {   // (the mouse: the row under it selected, a click as Enter, or on a choice's left or right half as
-                       // Left or Right; the wheel moves the selection, or over a choice changes it; a right click goes back)
-            const menu_hit::Hit hit = menu_hit::cheats(mx, my, scale, mw, mh, kCheatRows, cheat_value_l);
-            const bool on = hit.part == menu_hit::kCheatRow;
-            if (on && (moved || ptr.pressed) && hit.index != cheat_selected) cheat_selected = hit.index, changed = true;
-            const bool on_choice = on && hit.index == cheat_selected && chooses(hit.index) && hit.side != 0;
-            if ((ptr.pressed & HOS_MOUSE_LEFT) && on) {
-                if (on_choice) press[hit.side < 0 ? 3 : 4] = true;
+        // (the rows as shown, cheat_order: the arrows and the wheel go through them in that order)
+        auto step = [&](int dir, bool wrap) {
+            int k = 0;
+            while (k < kCheatRows && cheat_order[k] != cheat_selected) k++;
+            k = wrap ? (k + dir + kCheatRows) % kCheatRows : std::clamp(k + dir, 0, kCheatRows - 1);
+            cheat_selected = cheat_order[k], changed = true;
+            cheat_sc.reveal = true;   // (the keys moved it: in view)
+        };
+        if (!cheat_done.empty() && prof_now() >= cheat_done_until) cheat_done.clear(), changed = true;   // (its word said)
+        if (mouse) {   // (the mouse, over the cartridge: where paint_cheats put each row and its value, cheat_hit)
+            const int grab = (int)std::lround(6 * opt_u);
+            const bool inside = mx >= 0 && my >= 0 && mx < mw && my < mh;
+            const bool on_bar = scroll_mouse(cheat_sc, ptr, mx, my, mw, mh, opt_u, changed);
+            int over = -1, side = 0;
+            if (inside && !on_bar && my >= cheat_hit.body_top && my < cheat_hit.body_bottom)
+                for (int r = 0; r < kCheatRows; r++)
+                    if (my >= cheat_hit.top[r] && my < cheat_hit.bottom[r]) over = r;
+            if (over >= 0 && mx >= cheat_hit.value_l[over] && mx < cheat_hit.value_r[over] + grab)
+                side = mx < (cheat_hit.value_l[over] + cheat_hit.value_r[over]) / 2 ? -1 : 1;
+            if (over >= 0 && (moved || ptr.pressed) && over != cheat_selected) cheat_selected = over, changed = true;
+            const bool on_choice = over >= 0 && over == cheat_selected && chooses(over) && side != 0;
+            if ((ptr.pressed & HOS_MOUSE_LEFT) && over >= 0) {
+                if (on_choice) press[side < 0 ? 3 : 4] = true;
                 else press[7] = true;
             }
             if (ptr.pressed & HOS_MOUSE_RIGHT) press[5] = true;
-            if (ptr.wheel && on_choice) press[ptr.wheel > 0 ? 4 : 3] = true;   // (up for the wheel away, as the options')
-            else if (ptr.wheel) cheat_selected = ((cheat_selected - ptr.wheel) % kCheatRows + kCheatRows) % kCheatRows, changed = true;
         }
         if (press[5]) page = 0, changed = true;
         else {
-            if (press[1] || press[2]) {
-                cheat_selected = (cheat_selected + kCheatRows + (press[2] ? 1 : -1)) % kCheatRows;
-                changed = true;
-            }
+            if (press[1] || press[2]) step(press[2] ? 1 : -1, true);
             if (cheat_selected < 2 && (press[3] || press[4] || press[7])) {
                 if (cheat_selected == 0) protect_hearts.store(!protect_hearts.load());
                 else player_flight.store(player_flight.load() < 0 ? 0 : -1);
@@ -2646,9 +3662,18 @@ void menu_tick() {
             }
             if (press[7] && cheat_selected >= 2 && cheat_selected <= 4) {
                 cheat_action.store(cheat_selected == 4 ? 100 + clock_hour : cheat_selected);
+                char said[48];
+                snprintf(said, sizeof said, "the clock is set to %02d:00.", clock_hour);
+                cheat_say(cheat_selected == 2 ? "Link's position is marked." : cheat_selected == 3 ? "Link goes back to the mark." : said);
+                changed = true;
             }
             if (press[7] && cheat_selected == 6) {
                 cheat_action.store(200 + pouch_item * 32 + pouch_delta + 10);
+                char said[64];
+                snprintf(said, sizeof said, "%s %d %s.", pouch_delta > 0 ? "gave" : "took", pouch_delta > 0 ? pouch_delta : -pouch_delta,
+                         pouch_items[pouch_item]);
+                cheat_say(said);
+                changed = true;
             }
             if (press[7] && cheat_selected == 7) {
                 free_camera.store(!free_camera.load());
@@ -2677,8 +3702,7 @@ void menu_tick() {
         if (changed) redraw_menu(scale);
     } else if (open_now.load() && page == 4) {   // the inventory
         if (mouse)
-            list_mouse(ptr, mx, my, mw, mh, scale, moved, true, kItems, kItemSections, item_sections.s, item_scroll,
-                       item_choice, press, changed);
+            list_mouse_cart(ptr, mx, my, mw, mh, moved, true, kItems, item_choice, press, changed);
         if (press[5]) page = 2, changed = true;
         else {
             if (press[1] || press[2]) {
@@ -2698,6 +3722,7 @@ void menu_tick() {
                 item_choice = item_sections.s[section].first;
                 changed = true;
             }
+            if (press[1] || press[2] || press[13] || press[14] || press[15] || press[16] || tab_left || tab_right) list_sc[1].reveal = true;
             if (press[7]) cheat_action.store(OOT_CHEAT_ITEM_ACTION + item_choice * 256 + 200);
             else if (press[3] || press[4]) cheat_action.store(OOT_CHEAT_ITEM_ACTION + item_choice * 256 + 64 + (press[4] ? 1 : -1));
             if (changed) item_reveal();
@@ -2705,8 +3730,7 @@ void menu_tick() {
         if (changed) redraw_menu(scale);
     } else if (open_now.load() && page == 3) {   // the teleport list
         if (mouse)
-            list_mouse(ptr, mx, my, mw, mh, scale, moved, false, kTeleports, kTeleportSections, teleport_sections,
-                       teleport_scroll, teleport_choice, press, changed);
+            list_mouse_cart(ptr, mx, my, mw, mh, moved, false, kTeleports, teleport_choice, press, changed);
         if (press[5]) page = 2, changed = true;
         else if (press[7]) {
             cheat_action.store(1000 + teleport_choice);
@@ -2731,6 +3755,8 @@ void menu_tick() {
                 teleport_choice = teleport_sections[section].first;
                 changed = true;
             }
+            if (press[1] || press[2] || press[3] || press[4] || press[13] || press[14] || press[15] || press[16] || tab_left || tab_right)
+                list_sc[0].reveal = true;
             if (changed) teleport_reveal();
         }
         if (changed) redraw_menu(scale);
@@ -2739,7 +3765,7 @@ void menu_tick() {
         const int n = (int)travel.place.size(), sections = (int)travel.areas.size();
         press[9] |= pad(HOS_PAD_WEST);   // (Y on a pad, as Backspace: the picture taken again)
         bool switch_age = press[12] || pad(HOS_PAD_NORTH);   // (Tab, or X on a pad: the other age's places)
-        if (mouse && (ptr.pressed & HOS_MOUSE_LEFT) && my >= 14 * scale && my < 36 * scale)
+        if (mouse && (ptr.pressed & HOS_MOUSE_LEFT) && my >= travel_hit.age_t && my < travel_hit.age_b)
             for (int a = 0; a < 2; a++)
                 if (mx >= travel_age_l[a] && mx < travel_age_r[a] && a != travel.adult) switch_age = true;
         if (switch_age) {
@@ -2748,9 +3774,7 @@ void menu_tick() {
             ptr.pressed = 0;
             if (press[12]) tab_left = tab_right = false;   // (Tab is the tabs' key elsewhere: here the age's alone)
         }
-        if (mouse && mx < kTravelListW * scale && n)
-            list_mouse(ptr, mx, my, mw, mh, scale, moved, false, n, sections, travel.areas.data(), travel_scroll, travel_choice, press,
-                       changed);
+        if (mouse && n) travel_mouse(ptr, mx, my, mw, mh, moved, n, press, changed);
         else if (mouse && (ptr.pressed & HOS_MOUSE_RIGHT))
             press[5] = true;
         if (press[5]) page = 2, changed = true;   // (back to the Cheats page, as the teleport list)
@@ -2776,73 +3800,90 @@ void menu_tick() {
                 travel_choice = travel.areas[section].first;
                 changed = true;
             }
+            if (press[1] || press[2] || press[3] || press[4] || press[13] || press[14] || press[15] || press[16] || tab_left || tab_right)
+                travel_sc.reveal = true;
             if (changed) travel_reveal();
         }
         if (changed) redraw_menu(scale);
     } else if (open_now.load()) {
-        if (mouse) {   // (the mouse: see the top of this file)
+        if (mouse) {   // (the mouse, over the cartridge: where paint_options put each part, opt_hit)
             const int count = tab_row_count(cur_tab);
-            const menu_hit::Hit hit = menu_hit::options(mx, my, scale, mw, mh, TAB_COUNT, count, row_value_l, row_slider);
-            const int ht = hit.part == menu_hit::kTab ? hit.index : hit.part == menu_hit::kTabPrev ? 3
-                         : hit.part == menu_hit::kTabNext ? 4 : -1;
-            if (ht != hover_tab) hover_tab = ht, changed = true;
+            const OptHit& oh = opt_hit;
+            const int grab = (int)std::lround(6 * opt_u);   // (a click this far past a track's ends still takes them)
+            const bool inside = mx >= 0 && my >= 0 && mx < mw && my < mh;
+            int over_tab = -1, over_row = -1, side = 0, choice = -1, permille = 0;
+            bool on_track = false;
+            if (inside && my < oh.tabs_bottom) {
+                for (int t = 0; t < TAB_COUNT; t++)
+                    if (mx >= oh.tab_l[t] && mx < oh.tab_r[t]) over_tab = t;
+            } else if (inside && my >= oh.body_top && my < oh.body_bottom) {
+                for (int k = 0; k < oh.rows && k < count; k++)
+                    if (my >= oh.row_top[k] && my < oh.row_bottom[k]) over_row = k;
+            }
+            if (over_row >= 0) {
+                const int k = over_row;
+                if (mx >= oh.value_l[k] && mx < oh.value_r[k] + grab) side = mx < (oh.value_l[k] + oh.value_r[k]) / 2 ? -1 : 1;
+                for (int i = 0; oh.kind[k] == 2 && i < oh.choices[k]; i++)
+                    if (mx >= oh.choice_l[k][i] && mx < oh.choice_r[k][i]) choice = i;
+                if (oh.kind[k] == 3 && mx >= oh.track_l[k] - grab && mx < oh.track_r[k] + grab) {
+                    on_track = true;
+                    permille = std::clamp((mx - oh.track_l[k]) * 1000 / std::max(1, oh.track_r[k] - oh.track_l[k]), 0, 1000);
+                }
+            }
+            {   // (the wheel scrolls the rows, over the tabs it changes them; the bar is dragged or clicked)
+                MkwVkPointer sp = ptr;
+                if (over_tab >= 0) sp.wheel = 0;
+                if (scroll_mouse(opt_sc, sp, mx, my, mw, mh, opt_u, changed)) over_row = -1, side = 0, choice = -1, on_track = false;
+            }
+            if (over_tab != hover_tab) hover_tab = over_tab, changed = true;
             int& sel = tab_selected[cur_tab];
-            const bool on_row = hit.part == menu_hit::kRow || hit.part == menu_hit::kSlider;
             if (drag_row >= 0) {   // (a slider held: it follows the cursor's x until let go)
                 Row& d = rows[tab_row_to_global(cur_tab, drag_row)];
                 if (!(ptr.held & HOS_MOUSE_LEFT) || !d.value) {
                     drag_row = -1;
                     save();
                 } else {
-                    const int v = menu_hit::slider_value(menu_hit::slider_drag(mx, scale), d.lo, d.hi, d.step);
+                    const int p = std::clamp((mx - oh.track_l[drag_row]) * 1000 / std::max(1, oh.track_r[drag_row] - oh.track_l[drag_row]), 0, 1000);
+                    const int v = menu_hit::slider_value(p, d.lo, d.hi, d.step);
                     if (v != *d.value) set_row(d, v, v > *d.value ? 1 : -1, false), changed = true;
                 }
-            } else if (on_row && (moved || ptr.pressed) && hit.index != sel) {
-                sel = hit.index, changed = true;
+            } else if (over_row >= 0 && (moved || ptr.pressed) && over_row != sel) {
+                sel = over_row, changed = true;
             }
             if ((ptr.pressed & HOS_MOUSE_LEFT) && drag_row < 0) {
-                if (hit.part == menu_hit::kTabPrev) tab_left = true;
-                else if (hit.part == menu_hit::kTabNext) tab_right = true;
-                else if (hit.part == menu_hit::kTab && hit.index != cur_tab) cur_tab = hit.index, changed = true;
-                else if (hit.part == menu_hit::kSlider) {
-                    Row& d = rows[tab_row_to_global(cur_tab, hit.index)];
-                    drag_row = hit.index;
-                    const int v = menu_hit::slider_value(hit.permille, d.lo, d.hi, d.step);
-                    if (v != *d.value) set_row(d, v, v > *d.value ? 1 : -1, false);
-                    changed = true;
-                } else if (hit.part == menu_hit::kRow) {
-                    Row& d = rows[tab_row_to_global(cur_tab, hit.index)];
+                if (over_tab >= 0 && over_tab != cur_tab) cur_tab = over_tab, changed = true;
+                else if (over_row >= 0) {
+                    Row& d = rows[tab_row_to_global(cur_tab, over_row)];
                     if (!d.value) press[7] = true;   // (a page: as Enter)
-                    else if (d.hi - d.lo == d.step || hit.side >= 0) press[4] = true;   // (a toggle flips; the right half, or the name, as Right)
-                    else press[3] = true;                                               // (the left half as Left)
+                    else if (choice >= 0) {          // (one of its choices: that one)
+                        const int v = d.lo + choice * d.step;
+                        if (v != *d.value) set_row(d, v, v > *d.value ? 1 : -1);
+                        changed = true;
+                    } else if (on_track) {           // (a slider's track: there, and held it follows the cursor)
+                        drag_row = over_row;
+                        const int v = menu_hit::slider_value(permille, d.lo, d.hi, d.step);
+                        if (v != *d.value) set_row(d, v, v > *d.value ? 1 : -1, false);
+                        changed = true;
+                    } else if (side >= 0) press[4] = true;   // (a switch flips; a value's right half, or the name, as Right)
+                    else press[3] = true;                    // (the left half as Left)
                 }
             }
             if (ptr.pressed & HOS_MOUSE_RIGHT) press[5] = true;   // (as Esc)
-            if (ptr.wheel && drag_row < 0) {
-                Row& d = rows[tab_row_to_global(cur_tab, sel)];
-                const bool on_value = on_row && hit.index == sel && d.value &&
-                                      (hit.part == menu_hit::kSlider || hit.side != 0);
-                if (hit.part == menu_hit::kTab || hit.part == menu_hit::kTabPrev || hit.part == menu_hit::kTabNext) {
-                    if (ptr.wheel > 0) tab_left = true;
-                    else tab_right = true;
-                } else if (on_value) {   // (over a value: it changes, up for the wheel away; a slider or a scale stops at its ends)
-                    const int dir = ptr.wheel > 0 ? 1 : -1;
-                    for (int n = ptr.wheel > 0 ? ptr.wheel : -ptr.wheel; n > 0; n--) {
-                        const int v = *d.value + dir * d.step;
-                        if ((is_slider(d) || stops_at_ends(d)) && (v < d.lo || v > d.hi)) break;
-                        set_row(d, v, dir);
-                    }
-                    changed = true;
-                } else if (on_row || hit.part == menu_hit::kNone) {   // (elsewhere on the menu: the selection moves)
-                    sel = ((sel - ptr.wheel) % count + count) % count, changed = true;
-                }
+            if (ptr.wheel && drag_row < 0 && over_tab >= 0) {   // (over the tabs: the previous or the next)
+                if (ptr.wheel > 0) tab_left = true;
+                else tab_right = true;
             }
         }
         if (press[5] && restart_ask()) page = 5, ask_sel = 0, ask_quit = false, changed = true;   // (the restart question first)
         else if (press[5]) open_now = false;
         // (the tabs: LB and RB, Q and E, or Tab)
+        if (press[1] || press[2] || press[3] || press[4]) opt_sc.reveal = true;   // (the keys moved or changed: show the row)
         if (tab_left) cur_tab = (cur_tab + TAB_COUNT - 1) % TAB_COUNT, changed = true;
         else if (tab_right) cur_tab = (cur_tab + 1) % TAB_COUNT, changed = true;
+        {
+            static int scrolled_tab = -1;
+            if (scrolled_tab != cur_tab) scrolled_tab = cur_tab, opt_sc.px = 0, opt_sc.reveal = true;
+        }
         const int tab_count = tab_row_count(cur_tab);
         int& selected = tab_selected[cur_tab];
         if (press[1]) selected = (selected + tab_count - 1) % tab_count, changed = true;
@@ -2855,15 +3896,6 @@ void menu_tick() {
         if ((press[3] || press[4] || press[7]) && r.value) {   // (Enter, or the bottom face button, as Right)
             if (press[7]) press[4] = true;
             set_row(r, *r.value + (press[4] ? r.step : -r.step), press[4] ? 1 : -1);
-            changed = true;
-        }
-        const int64_t now = prof_now();
-        if (changed) {   // (a new row or value: its name from the start, after a rest)
-            marquee_pos = 0, marquee_next = now + kMarqueeRest;
-        } else if (marquee_max > 0 && now >= marquee_next) {
-            if (marquee_pos >= marquee_max) marquee_pos = 0, marquee_next = now + kMarqueeRest;   // (back to the start)
-            else if (++marquee_pos >= marquee_max) marquee_next = now + kMarqueeRest;            // (rest at the end)
-            else marquee_next = now + kMarqueeStep;
             changed = true;
         }
         if (changed) redraw_menu(scale);
@@ -2901,6 +3933,7 @@ void menu_tick() {
         SelectObject(dc, old);
         DeleteObject(f);
         DeleteDC(dc);
+        notice_bmp.keyed = true;   // (its round corners see-through: set before its first drawing, and never changed)
         gdi_draw(notice_bmp, (uint32_t)sz.cx + 40u * scale, 40u * scale, paint_notice, scale);
     }
 }

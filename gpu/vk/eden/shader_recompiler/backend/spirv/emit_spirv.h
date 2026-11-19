@@ -44,6 +44,11 @@ constexpr u32 MESH_FALLBACK_PUSH_OFFSET = MESH_FIRST_PUSH_OFFSET + 8;
 constexpr u32 MESH_FALLBACK_PAYLOAD_PUSH_OFFSET = MESH_FALLBACK_PUSH_OFFSET;
 constexpr u32 MESH_FALLBACK_RECORDS_PUSH_OFFSET = MESH_FALLBACK_PUSH_OFFSET + 8;
 constexpr u32 MESH_FALLBACK_PUSH_END = MESH_FALLBACK_PUSH_OFFSET + 16;
+// (relink, issue 640) the fallback's first task workgroup (or mesh workgroup, for a mesh program without a task) of the batch being
+// dispatched, a u32 in RescalingLayout's padding after down_factor: a draw of more workgroups than the slots hold runs as several
+// dispatches, each from 0, and the program reads its workgroup index plus this. Only the fallback's task and mesh stages declare it
+constexpr u32 MESH_FALLBACK_BASE_PUSH_OFFSET = RESCALING_LAYOUT_DOWN_FACTOR_OFFSET + 4;
+static_assert(MESH_FALLBACK_BASE_PUSH_OFFSET + 4 <= sizeof(RescalingLayout));
 // (relink) the fallback's mesh workgroups a draw can run: each gets a record slot and a payload. The vertex stage draws
 // this many slots and holds the ones no mesh workgroup wrote to outside the clip volume.
 constexpr u32 MESH_FALLBACK_CAPACITY = 1024;

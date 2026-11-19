@@ -170,6 +170,24 @@ jobs:
           mkdir -p "$RUNNER_TEMP/package/tools/work"
           python -I nx2/make_icon.py launcher/app.ico "$RUNNER_TEMP/package/tools/work"
 
+      # (the Vulkan back end built here as a player's PC builds it: the package's own tools, the play profile, the CPM part and the
+      # same llvm-mingw. Shipped in the app part as tools/prebuilt/relink_vk.dll with its key (nx2/build.py vk_jobs_key): a player's
+      # first build whose key is the same takes it instead of compiling ~500 files; one with NVIDIA DLSS or another CPU level
+      # compiles them as before)
+      - name: Prebuilt Vulkan back end
+        if: env.PREVIOUS != ''
+        run: |
+          cpm=$(python -I scripts/release_parts.py cpm "$PREVIOUS" "$RUNNER_TEMP/cpm")
+          # (the release name the player's tools carry, which the Insert menu shows: make_setup_parts.py writes the same file)
+          printf '%s\n' "$TAG" > "$RUNNER_TEMP/package/tools/version.txt"
+          RELINK_MINGW="$LLVM_MINGW" RX_VK_ONLY=1 RX_RELEASE=1 RX_MARCH=x86-64-v3 RX_CPM="$cpm" OOT_WORK="$RUNNER_TEMP/vk-prebuilt" \
+            RX_VK_PGO="$RUNNER_TEMP/package/tools/work/relink_vk.profdata" \
+            python -I "$RUNNER_TEMP/package/tools/nx2/build.py" --standalone --jobs "$NUMBER_OF_PROCESSORS"
+          mkdir -p "$RUNNER_TEMP/package/tools/prebuilt"
+          cp "$RUNNER_TEMP/vk-prebuilt/sa/build/relink_vk.dll" "$RUNNER_TEMP/vk-prebuilt/sa/build/relink_vk.dll.key" \
+            "$RUNNER_TEMP/package/tools/prebuilt/"
+          cat "$RUNNER_TEMP/package/tools/prebuilt/relink_vk.dll.key"
+
       - name: Setup parts
         run: |
           python -I scripts/make_setup_parts.py "$RUNNER_TEMP/package" "$TAG" dist \

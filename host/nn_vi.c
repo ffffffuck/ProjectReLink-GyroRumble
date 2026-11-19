@@ -62,15 +62,56 @@ HLE(_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE) {
 }
 
 /* nn::vi::QueryDisplayHdrStatus(bool* on, HdrOutputFormat*, unsigned short* max nits, Display const*) -> Result */
+/* (relink) HDR output. The game asks whether its display is HDR; told yes, it makes its window textures RGB10A2 and draws its own
+   HDR picture in them (ST 2084 / BT.2020, its interface at the paper white), and sends the layer's metadata below. It is told yes
+   when the renderer's window images are HDR10 (gpu/vk/vk_main.cpp hdr_output: the Graphics tab's HDR row, Windows' HDR on for the
+   display); the peak is the display's own (DXGI). HOS_HDR=0/1 over it (tests: the game's HDR picture shown in an SDR window is
+   grey and washed out), HOS_HDR_FORMAT (1: the value the game took on the first try), HOS_HDR_NITS, HOS_HDR_PAPER_WHITE */
+static int hdr_env(const char *name, int dflt) {
+    const char *e = getenv(name);
+    return e && *e ? atoi(e) : dflt;
+}
+int rx_option(int id, int otherwise);
+static int hdr_on(void) {
+    const int env = hdr_env("HOS_HDR", -1);
+    return env >= 0 ? env != 0 : rx_option(70, 0) != 0;   /* (HOS_OPT_HDR, gpu/vk/vk_menu.h) */
+}
 HLE(_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE) {
-    *(uint8_t *)GP(ARG(0)) = 0;
-    if (ARG(1)) G32(ARG(1)) = 0;
-    if (ARG(2)) *(uint16_t *)GP(ARG(2)) = 0;
+    static int told;
+    const int on = hdr_on();
+    const int format = hdr_env("HOS_HDR_FORMAT", 1), nits = hdr_env("HOS_HDR_NITS", rx_option(71, 1000));
+    *(uint8_t *)GP(ARG(0)) = (uint8_t)on;
+    if (ARG(1)) G32(ARG(1)) = on ? (uint32_t)format : 0;
+    if (ARG(2)) *(uint16_t *)GP(ARG(2)) = on ? (uint16_t)(nits < 100 ? 100 : nits > 10000 ? 10000 : nits) : 0;
+    if (told++ < 4) hos_log("vi: QueryDisplayHdrStatus -> %s (format %d, %d nits)", on ? "on" : "off", on ? format : 0, on ? nits : 0);
     RET(0);
 }
 /* nn::vi::QueryDisplayHdrPaperWhite(unsigned short*, Display const*) -> Result */
 HLE(_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE) {
-    *(uint16_t *)GP(ARG(0)) = 203;
+    *(uint16_t *)GP(ARG(0)) = (uint16_t)hdr_env("HOS_HDR_PAPER_WHITE", rx_option(72, 203));
+    RET(0);
+}
+/* The layer's HDR metadata for the next frames (what the game says its picture holds) */
+HLE(_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE) {
+    static uint64_t last = ~0ull;
+    if (ARG(1) != last) last = ARG(1), hos_log("vi: the game's HDR content gamut %llu", (unsigned long long)last);
+    RET(0);
+}
+HLE(_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE) {
+    static uint64_t last = ~0ull;
+    if (ARG(1) != last) last = ARG(1), hos_log("vi: the game's HDR-to-SDR tone mapping %llu", (unsigned long long)last);
+    RET(0);
+}
+HLE(_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt) {
+    static uint64_t last = ~0ull;
+    const uint64_t v = (ARG(1) & 0xffff) << 16 | (ARG(2) & 0xffff);
+    if (v != last) last = v, hos_log("vi: the game's extended content luminance %u..%u", (unsigned)(ARG(1) & 0xffff), (unsigned)(ARG(2) & 0xffff));
+    RET(0);
+}
+HLE(_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt) {
+    static uint64_t last = ~0ull;
+    const uint64_t v = (ARG(1) & 0xffff) << 16 | (ARG(2) & 0xffff);
+    if (v != last) last = v, hos_log("vi: the game's standard content luminance %u..%u", (unsigned)(ARG(1) & 0xffff), (unsigned)(ARG(2) & 0xffff));
     RET(0);
 }
 /* nn::vi::QueryDisplayVrrSupported(bool*, Display const*) -> Result */

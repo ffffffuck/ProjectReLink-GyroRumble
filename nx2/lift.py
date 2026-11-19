@@ -194,6 +194,13 @@ def main():
         oot_fov.install(L, img)
         import oot_step_rate   # (relink, issues 16 and 67) the time step follows the real frame rate above 60 fps too
         oot_step_rate.install(L, img)
+        # (relink) A64_LOCAL_REGS: the functions the text patches look for after the lift (oot_patches.py and
+        # oot_native_resolution.py name them; their patterns spell the guest's registers as the context's) keep their
+        # registers in the context. Without this four of those patches found nothing (build fp_v3loc, 2026-11-18)
+        import re as re_
+        for patches in ("oot_patches.py", "oot_native_resolution.py"):
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), patches), encoding="utf-8") as f:
+                L.no_local |= {int(x, 16) for x in re_.findall(r"\bf_([0-9a-f]{8})\b", f.read())}
     L.discover(max_insns=a.max_func)
     print("discovered %d functions (%.0fs)" % (len(L.funcs), time.time() - t0))
     # (relink) exefs mods (nx2/exefs_mods.py, OOT_EXEFS_PATCHES: what make_game.py applied to this exefs): which functions
@@ -227,7 +234,7 @@ def main():
                              counters=[] if a.no_polls else [poll.stats])
         import oot_patches
         main_build = next((m["build_id"] for m in meta["modules"] if m["name"] == "main"), "")
-        for name in ("relink_exefs_lift.txt", "relink_exefs_stop.txt"):   # (exefs_mods.LIFT_NOTES, LIFT_STOP: an earlier lift's)
+        for name in ("relink_exefs_lift.txt", "relink_exefs_stop.txt", kit.LIFT_SOURCES):   # (exefs_mods.LIFT_NOTES, LIFT_STOP: an earlier lift's)
             if os.path.exists(os.path.join(gen, name)):
                 os.remove(os.path.join(gen, name))
         try:
@@ -250,6 +257,7 @@ def main():
             print("standalone: nvn2_exports.c (%d sdk NVN functions routed to host/nvn2.c)" % len(nvn))
         L.report()
         print("interrupt polls: %d loop headers in %d functions" % (poll.stats["polls"], poll.stats["functions"]))
+        kit.note_sources(gen)   # (relink: what of nx2/ this lift read, for make_game.py's lift key)
         print("wrote %d code files to %s (%.0fs)" % (len(files), gen, time.time() - t0))
     print("done (%.0fs)" % (time.time() - t0))
 
