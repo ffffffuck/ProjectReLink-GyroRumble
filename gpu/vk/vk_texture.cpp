@@ -288,6 +288,10 @@ const uint64_t kSpareBytes = (uint64_t)(getenv("RX_VK_SPARE_MB") ? std::max(16, 
 // for 54-57 on the same route)
 uint64_t commit_left_bytes = UINT64_MAX, commit_total_bytes = 0, ram_total_bytes = 0;
 #ifdef _WIN32
+/// (relink, issue 33) The page files' maximum sizes in MB, where they are sized by hand ("c:\pagefile.sys <min> <max>"): one
+/// whose maximum is above its minimum grows up to it as commits need it, so the commit left is what is left now plus the
+/// room up to that maximum. 0: none sized so (or not known)
+uint64_t pagefile_max_mb = 0;
 /// (igpu-fix) Whether a page file is sized by Windows ("System managed size": "c:\pagefile.sys 0 0" or "?:\pagefile.sys" in
 /// PagingFiles): Windows grows it as commits need it, so what is left to commit now is not the limit it looks like
 bool pagefile_grows() {
@@ -301,12 +305,16 @@ bool pagefile_grows() {
         const bool ok = RegQueryValueExA(k, "PagingFiles", nullptr, &type, (LPBYTE)buf, &n) == ERROR_SUCCESS && type == REG_MULTI_SZ;
         RegCloseKey(k);
         if (!ok) return false;
+        bool managed = false;
         for (const char* e = buf; *e; e += strlen(e) + 1) {
             unsigned lo = 1, hi = 1;
             const char* sp = strchr(e, ' ');
-            if (e[0] == '?' || (sp && sscanf(sp, "%u %u", &lo, &hi) == 2 && lo == 0 && hi == 0)) return true;
+            const bool sized = sp && sscanf(sp, "%u %u", &lo, &hi) == 2;
+            if (e[0] == '?' || (sized && lo == 0 && hi == 0)) managed = true;
+            else if (sized) pagefile_max_mb += hi;
         }
-        return false;
+        if (managed) pagefile_max_mb = 0;
+        return managed;
     }();
     return grows;
 }
@@ -315,15 +323,25 @@ uint64_t commit_short(uint64_t frame) {
 #ifdef _WIN32
     // (igpu-fix) 512 MB where Windows grows the page file: with 2048 a ROG Xbox Ally X sat at 1.4 GB left, and its texture budget
     // was cut under what the scene draws, the textures in use let go and made again every few frames
+    // (relink, 17/11, issue 33: on every GPU, not only AMD's integrated ones. An RTX 3050 (8 GB) on a 32 GB PC whose page file
+    // Windows grows sat at 0.7-1.9 GB left from the first area on (NVIDIA backs every byte of VRAM with commit): with 2048 the
+    // textures were held at 3 GB, 50-444 of them let go and made again every 10 s instead of 3, the slowest frame of each 10 s
+    // 95-145 ms instead of 30-50, and the commit left no higher, the same textures made again at once. The page file grew from
+    // 39 to 41 GB meanwhile, as Windows does. A page file sized by hand counts up to its maximum (pagefile_max_mb))
     static const uint64_t headroom = (uint64_t)(getenv("RX_VK_COMMIT_FREE_MB") ? std::max(0, atoi(getenv("RX_VK_COMMIT_FREE_MB")))
-                                                : pagefile_grows() && amd_igpu() ? 512 : 2048) << 20;
+                                                : pagefile_grows() ? 512 : 2048) << 20;
     static uint64_t asked = UINT64_MAX;
     if (asked == UINT64_MAX || frame - asked >= 30) {
         asked = frame;
         MEMORYSTATUSEX ms{};
         ms.dwLength = sizeof ms;
-        if (GlobalMemoryStatusEx(&ms))
+        if (GlobalMemoryStatusEx(&ms)) {
             commit_left_bytes = ms.ullAvailPageFile, commit_total_bytes = ms.ullTotalPageFile, ram_total_bytes = ms.ullTotalPhys;
+            // (a page file sized by hand grows up to its maximum: the room up to it is left to commit too)
+            pagefile_grows();
+            const uint64_t most = ms.ullTotalPhys + (pagefile_max_mb << 20);
+            if (pagefile_max_mb && most > ms.ullTotalPageFile) commit_left_bytes += most - ms.ullTotalPageFile;
+        }
     }
     return headroom && commit_left_bytes < headroom ? headroom - commit_left_bytes : 0;
 #else
@@ -4303,11 +4321,34 @@ VkBufferView texel_buffer_view(const nvn_tex* t, const nvn_view* v, bool storage
     const uint64_t size = (uint64_t)std::max(1u, t->d.width) * bpb;
     // (a formatted store into it: textures over that memory are uploaded again once the GPU is done)
     if (storage) texture_gpu_wrote(t->gpu, size);
-    static std::unordered_map<uint64_t, VkBufferView> views;
+    // (relink, 17/11, Discord: kalm, "crashed crossing the finish line of the first race at Lon Lon Ranch", RTX 4060 Ti) The views
+    // were kept by address alone, and returned without asking for the buffer again: the pool under one was then not marked in use
+    // (gpu_buffer's last_value) and could be given back while draws still read it, and once its pool was made again larger or
+    // given back (NVIDIA: retired_imports_give_back destroys the buffer), the view kept pointing into a destroyed buffer. His crash,
+    // symbolized on a build of the same sources and options: the replay's parallel worker, draw, bind_descriptors,
+    // vkCmdPushDescriptorSetKHR, and NVIDIA's driver reading address 0x2d6200, 80 log lines after "pool 0x7fc6000000 remade
+    // larger". Now the buffer is asked for at every call, and a view made over another buffer, another offset or before a pool
+    // left the table is made again; the old one is destroyed once the GPU is past the recording that let it go
+    struct Cached {
+        VkBufferView view;
+        VkBuffer buffer;
+        uint64_t offset, gen;
+    };
+    static std::unordered_map<uint64_t, Cached> views;
+    static std::deque<std::pair<VkBufferView, uint64_t>> old_views;
+    while (!old_views.empty() && old_views.front().second + 2 <= completed_value) {
+        vkDestroyBufferView(dev.device, old_views.front().first, nullptr);
+        old_views.pop_front();
+    }
     const uint64_t key = mix(mix(t->gpu, (uint64_t)f << 1 | storage), size);
+    const uint64_t gen = memory_pools_generation();
+    BufferRef b = gpu_buffer(t->gpu, size);   // (every time: the pool marked in use by this recording)
     auto it = views.find(key);
-    if (it != views.end()) return it->second;
-    BufferRef b = gpu_buffer(t->gpu, size);
+    if (it != views.end()) {
+        if (b && it->second.buffer == b.buffer && it->second.offset == b.offset && it->second.gen == gen) return it->second.view;
+        if (it->second.view) old_views.push_back({it->second.view, rec_value});
+        views.erase(it);
+    }
     VkBufferView bv = VK_NULL_HANDLE;
     if (b && b.offset % std::max<uint64_t>(dev.props.limits.minTexelBufferOffsetAlignment, 1) == 0) {
         VkBufferViewCreateInfo ci{VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO};
@@ -4317,7 +4358,7 @@ VkBufferView texel_buffer_view(const nvn_tex* t, const nvn_view* v, bool storage
         ci.range = std::min<uint64_t>(size, (uint64_t)dev.props.limits.maxTexelBufferElements * bpb);
         vkCreateBufferView(dev.device, &ci, nullptr, &bv);
     }
-    views[key] = bv;
+    views[key] = {bv, b ? b.buffer : VK_NULL_HANDLE, b ? b.offset : 0, gen};
     return bv;
 }
 
@@ -4363,6 +4404,7 @@ int defrag_mb() {   // (ON by default since hs199/hs200: the same route back to 
 }
 uint64_t made_last_frame = 0;   // (textures made in the last present's frame: a scene change under way, no pass then)
 constexpr uint64_t kDefragBusy = 16;
+constexpr int64_t kDefragStallNs = 50000000;
 void defrag_finish() {
     uint64_t moved = 0, freed = 0, bb = 0, ab = 0;
     uint32_t moves = 0, blocks_freed = 0, blocks = 0;
@@ -4376,7 +4418,13 @@ void defrag_finish() {
              blocks_freed, (unsigned long long)(freed >> 20), blocks, (unsigned long long)((bb - std::min(bb, ab)) >> 20),
              defrag_start_blocks, (long long)(defrag_start_free >> 20), defrag_ns / 1e6, defrag_max_ns / 1e6);
     defrag_running = false;
-    defrag_next_frame = frame_no + 120;
+    // (issue 136) a step of 50 ms or more ended this defragmentation at once (defrag_frame), and the next one waits four times
+    // longer each time that happens again, up to hours: whatever the driver is slow at there, it is not paid in a row
+    static uint32_t stalls = 0;
+    stalls = defrag_max_ns >= kDefragStallNs ? std::min<uint32_t>(stalls + 1, 6) : 0;
+    if (stalls) logf("vk: the defragmentation stopped after a step of %.0f ms: the next one in %llu frames at the soonest",
+                     defrag_max_ns / 1e6, (unsigned long long)(120ull << (2 * stalls)));
+    defrag_next_frame = frame_no + (120ull << (2 * stalls));
     defrag_slow = defrag_max_ns > 6000000;
 }
 void texture_defrag_step() {
@@ -4401,7 +4449,7 @@ void texture_defrag_step() {
         defrag_start_free = (int64_t)(bb - ab), defrag_start_blocks = blocks;
     }
     if (frame_no == defrag_pass_frame) return;   // (a pass a present at most)
-    if (!image_defrag_pass(defrag_moves)) {
+    if (defrag_max_ns >= kDefragStallNs || !image_defrag_pass(defrag_moves)) {   // (a stalled step: no further pass, issue 136)
         defrag_finish();
         return;
     }
@@ -4528,7 +4576,7 @@ void defrag_frame(uint64_t completed) {
     static int logged;
     if (defrag_log() && logged++ < 2000)
         logf("vk: defrag pass ended at frame %llu: %.2f ms (%zu old images to destroy)", (unsigned long long)frame_no, ns / 1e6, olds);
-    if (!more || defrag_passes >= 256) defrag_finish();
+    if (!more || defrag_passes >= 256 || ns >= kDefragStallNs) defrag_finish();
 }
 
 void defrag_frame(uint64_t completed);

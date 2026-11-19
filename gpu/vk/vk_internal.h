@@ -65,6 +65,8 @@ struct Device {
     VkPhysicalDeviceVulkan12Features vk12{};
     VkPhysicalDeviceVulkan13Features vk13{};
     VkShaderStageFlags sg32_stages = 0;   // (stages that run at 32 lanes when asked: the size the translated programs assume)
+    bool big_warp = false;   // (graphics stages that may run wider than 32 lanes, not held to 32: AMD's. The translation then
+                             // keeps each 32-lane group apart: Profile::warp_size_potentially_larger_than_guest)
     uint32_t max_push_descriptors = 0;
     // no window (HOS_HEADLESS): presents go to an image of their own, which RX_VK_SHOTS can write out
     bool offscreen = false;
@@ -172,6 +174,34 @@ void memory_pool_created(uint64_t gpu, uint64_t size);
 int memory_guest_imported(uint64_t lo, uint64_t hi);
 /// (relink) The newest write-back of guest [guest, guest + size) the GPU is past (`done`), 0 when none is known (vk_memory.cpp)
 uint64_t memory_readback_landed(uint64_t guest, uint64_t size, uint64_t done, uint64_t* pending);
+/// (relink, experiment, RX_VK_LATE_SEQ=1) the write-backs this thread has noted since its last submit are in the submit
+/// numbered seq on the recordings' timeline (vk_replay.cpp submit_recording)
+void memory_wb_seq_assign(uint64_t seq);
+uint64_t vk_rec_completed();                 // (vk_replay.cpp: the GPU's progress on the recordings' timeline)
+bool vk_rec_wait(uint64_t seq, uint32_t ms);  // (and a wait for one of its numbers; true when the GPU is past it)
+/// (relink, RX_VK_METER_ZERO / RX_VK_METER_HOLD) the start of a block OoT's exposure programs write, noted where they bind
+/// it; and whether guest is one
+void memory_meter_range(uint64_t guest, uint64_t size);
+bool memory_is_meter(uint64_t guest);
+/// (relink) The game no longer held for the GPU's whole frame at its first submit. RX_VK_FAST_SYNC=1 turns
+/// on its four parts together; each has its own variable, which decides when it is set ("0": off):
+///   RX_VK_METER_ZERO  the exposure meter's sums cleared on the GPU right before the programs that add to them
+///   RX_VK_METER_HOLD  the game's read of those sums given the last result again when no new one has landed
+///   RX_VK_LATE_SEQ    a capture's late pages wait for the submit that holds their write-back, not the submission's last
+///   RX_VK_CAPTURE_WAIT_WHO (2 with it)  the presenting thread's captures do not wait
+/// On by default on every card (the maintainer's choice of 19/11; measured and watched on NVIDIA only: on AMD and Intel
+/// cards nobody has looked at it yet). RX_VK_FAST_SYNC=0 turns it off.
+inline bool fast_sync_all() {
+    static const bool all = getenv("RX_VK_FAST_SYNC") ? atoi(getenv("RX_VK_FAST_SYNC")) != 0 : true;
+    return all;
+}
+inline bool fast_sync_part(const char* name) {
+    if (const char* e = getenv(name)) return atoi(e) != 0;
+    return fast_sync_all();
+}
+/// (relink, experiment, RX_VK_LATE_SEQ=1) pages whose GPU-written words are cleared on the GPU before they are added to
+/// (the exposure meter's with RX_VK_METER_ZERO, the sky light's sums): a capture's copy of them waits for no write-back
+void memory_no_late(uint64_t guest, uint64_t size);
 /// (relink) The game freed the address region [lo, hi): what no import holds of it is decommitted (vk_memory.cpp)
 void memory_guest_release(uint64_t lo, uint64_t hi);
 void memory_stats(int64_t* mirrors, uint64_t* mirror_mb, int64_t* sync_bytes, int64_t* sync_copies, int64_t* wb_bytes);
@@ -242,6 +272,9 @@ int vk_value_is_mine(uint64_t v);   // (relink, diagnostic: the calling thread b
 uint64_t vk_present_value();        // (relink: the newest timeline value begun when the last present came)
 void vk_timeline_wait(uint64_t v);
 uint32_t memory_generation();
+/// (relink) bumped each time a pool leaves the table or its buffer is given back (vk_memory.cpp pools_gen): what was made over a
+/// pool's buffer before may be over a destroyed one now (texel_buffer_view)
+uint64_t memory_pools_generation();
 /// 1: a page of [guest, guest + size) was written after generation gen; 0: none was
 bool memory_written_since(uint64_t guest, uint64_t size, uint32_t gen);
 void memory_stamp(uint64_t guest, uint64_t size);   // a write the watch does not see (GPU writes, host writes)

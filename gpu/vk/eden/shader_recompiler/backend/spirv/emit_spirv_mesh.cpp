@@ -46,7 +46,7 @@ Id PayloadWord(EmitContext& ctx, Id index) {
         const Id first{ctx.OpIAdd(
             ctx.U32[1], ctx.Const(MESH_FALLBACK_CAPACITY),
             ctx.OpIMul(ctx.U32[1], slot, ctx.Const(ctx.mesh_info.payload_words)))};
-        return BufferWordAt(ctx, PushU64(ctx, MESH_FALLBACK_PAYLOAD_PUSH_OFFSET),
+        return BufferWordAt(ctx, PushU64(ctx, ctx.mesh_fallback_payload_member_index),
                             ctx.OpIAdd(ctx.U32[1], first,
                                        Clamped(ctx, index, ctx.mesh_info.payload_words)));
     }
@@ -131,6 +131,8 @@ u32 FallbackRecordWords(const MeshInfo& mesh) {
            static_cast<u32>(mesh.primitive_lines.size());
 }
 
+/// A u64 of the push block, by its member index (the payload's was given by its byte offset, 64, an index past the block's
+/// members: an invalid module NVIDIA's compiler faulted on, issue 640)
 Id PushU64(EmitContext& ctx, u32 member) {
     const Id pointer_type{ctx.TypePointer(spv::StorageClass::PushConstant, ctx.U64)};
     return ctx.OpLoad(
@@ -202,7 +204,7 @@ void MeshFallbackEpilogue(EmitContext& ctx) {
         if (ctx.runtime_info.mesh_fallback_task) {
             // (a task thread starts at most one mesh workgroup: the slots it did not start output nothing)
             const Id started{ctx.OpLoad(
-                ctx.U32[1], BufferWordAt(ctx, PushU64(ctx, MESH_FALLBACK_PAYLOAD_PUSH_OFFSET), slot))};
+                ctx.U32[1], BufferWordAt(ctx, PushU64(ctx, ctx.mesh_fallback_payload_member_index), slot))};
             count = ctx.OpSelect(ctx.U32[1], ctx.OpIEqual(ctx.U1, started, ctx.u32_zero_value),
                                  ctx.u32_zero_value, count);
         }
@@ -304,7 +306,7 @@ void TaskEpilogue(EmitContext& ctx) {
         // and the rest stay culled.)
         const Id started{ctx.OpULessThan(ctx.U1, LocalInvocation(ctx), count)};
         If(ctx, ctx.OpULessThan(ctx.U1, slot, ctx.Const(MESH_FALLBACK_CAPACITY)), [&] {
-            ctx.OpStore(BufferWordAt(ctx, PushU64(ctx, MESH_FALLBACK_PAYLOAD_PUSH_OFFSET), slot),
+            ctx.OpStore(BufferWordAt(ctx, PushU64(ctx, ctx.mesh_fallback_payload_member_index), slot),
                         started);
             If(ctx, started, [&] {
                 const Id first{ctx.OpIAdd(
@@ -312,7 +314,7 @@ void TaskEpilogue(EmitContext& ctx) {
                     ctx.OpIMul(ctx.U32[1], slot, ctx.Const(ctx.mesh_info.payload_words)))};
                 const Id invocation{LocalInvocation(ctx)};
                 Strided(ctx, ctx.mesh_info.payload_words, ctx.mesh_threads, invocation, [&](Id index) {
-                    ctx.OpStore(BufferWordAt(ctx, PushU64(ctx, MESH_FALLBACK_PAYLOAD_PUSH_OFFSET),
+                    ctx.OpStore(BufferWordAt(ctx, PushU64(ctx, ctx.mesh_fallback_payload_member_index),
                                              ctx.OpIAdd(ctx.U32[1], first, index)),
                                 ctx.OpLoad(ctx.U32[1], PayloadWord(ctx, index)));
                 });
@@ -502,11 +504,25 @@ Id EmitIsbeRead(EmitContext& ctx, Id address) {
             const Id first{ctx.OpLoad(ctx.U32[1], member, spv::MemoryAccessMask::Aligned, 4U)};
             return ctx.OpIAdd(ctx.U32[1], workgroup, first);
         }
+        if (ctx.mesh_fallback && ctx.wants_mesh_fallback_base) {
+            // (relink, issue 640) the fallback runs a draw's task workgroups 32 at a time, each batch from 0: the meshlet is the
+            // batch's first plus this one, while the slot it writes stays this one's (TaskEpilogue)
+            return ctx.OpIAdd(ctx.U32[1], workgroup, ctx.MeshFallbackBase());
+        }
         return workgroup; // the input region holds the workgroup index (VERTEX_ID)
+    }
+    // (relink, issue 640) a mesh workgroup's own index (byte 0): the fallback dispatches one a slot, task workgroup * threads +
+    // thread, where the hardware numbers those a task workgroup starts from 0: the thread. As the slot, every task workgroup but
+    // the first read its meshlets past its payload's list. Without a task, the batch's first plus this workgroup
+    Id self{workgroup};
+    if (ctx.mesh_fallback && ctx.runtime_info.mesh_fallback_task && ctx.runtime_info.mesh_fallback_task_threads > 1) {
+        self = ctx.OpUMod(ctx.U32[1], workgroup, ctx.Const(ctx.runtime_info.mesh_fallback_task_threads));
+    } else if (ctx.mesh_fallback && ctx.wants_mesh_fallback_base) {
+        self = ctx.OpIAdd(ctx.U32[1], workgroup, ctx.MeshFallbackBase());
     }
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], address, ctx.Const(2U))};
     const Id word{ctx.OpLoad(ctx.U32[1], PayloadWord(ctx, index))};
-    return ctx.OpSelect(ctx.U32[1], ctx.OpIEqual(ctx.U1, address, ctx.u32_zero_value), workgroup,
+    return ctx.OpSelect(ctx.U32[1], ctx.OpIEqual(ctx.U1, address, ctx.u32_zero_value), self,
                         word);
 }
 
@@ -576,7 +592,10 @@ void EmitMeshPrologue(EmitContext& ctx) {
             ctx.OpStore(SharedWord(ctx, ctx.mesh_payload, at), ctx.u32_zero_value);
         }
         if (ctx.mesh_info.payload_words) {
-            ctx.OpStore(SharedWord(ctx, ctx.mesh_payload, ctx.u32_zero_value), WorkgroupId(ctx));
+            // (the batch's first plus this workgroup: the draw's meshlet, while the record slot stays this workgroup's)
+            const Id meshlet{ctx.wants_mesh_fallback_base ? ctx.OpIAdd(ctx.U32[1], WorkgroupId(ctx), ctx.MeshFallbackBase())
+                                                          : WorkgroupId(ctx)};
+            ctx.OpStore(SharedWord(ctx, ctx.mesh_payload, ctx.u32_zero_value), meshlet);
         }
         Barrier(ctx);
     }

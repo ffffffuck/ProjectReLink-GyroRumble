@@ -45,7 +45,14 @@ def main():
         assert first not in why and "update applied" in why, why
         why = make_game.romfs_problem(none, nup="game.nup")
         assert "not the game's own RomFS" in why and "game.nup" in why and none not in why, why
-    print("ok: romfs_problem (6 cases)")
+
+        # the same answers from the package's table of names, before the RomFS is unpacked (nup.resource_names)
+        assert make_game.romfs_problem(None, nup="game.nup", resource=["Other.bin", make_game.ROMFS_TABLE]) is None
+        why = make_game.romfs_problem(None, nup="D:\\dumps\\game.nup", resource=[FIRST])
+        assert "D:\\dumps\\game.nup" in why and FIRST in why and make_game.ROMFS_TABLE in why and "update applied" in why, why
+        why = make_game.romfs_problem(None, nup="game.nup", resource=[])
+        assert "not the game's own RomFS" in why and "game.nup" in why, why
+    print("ok: romfs_problem (9 cases)")
 
 
 if __name__ == "__main__":

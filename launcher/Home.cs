@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using static ReLink.Texts;
@@ -18,7 +20,7 @@ public partial class MainWindow
     int origHz;
     bool display60Possible;
 
-    CheckBox Fullscreen = null!, Display60 = null!, FpsCounter = null!, Ultrawide = null!, FramePacing = null!, Audio = null!, Handheld = null!, InvertY = null!,
+    CheckBox Fullscreen = null!, Display60 = null!, FpsCounter = null!, Ultrawide = null!, FramePacing = null!, VSync = null!, Audio = null!, Handheld = null!, InvertY = null!,
              NvidiaDlss = null!;
     WrapPanel ResolutionGroup = null!, UpscalerGroup = null!, UpscaleGroup = null!, FrameRateGroup = null!, SpeedGroup = null!, FramegenGroup = null!, UiLanguageGroup = null!;
     Slider Sharpness = null!;
@@ -109,6 +111,10 @@ public partial class MainWindow
                   "Framegen", (0, L("Aucune", "None")), (2, "×2"), (3, "×3"), (4, "×4"));
         SwitchRow(RowsSmooth, L("Rythme régulier des images générées", "Even pacing of generated frames"),
                   L("Avec la génération d'images seulement.", "With frame generation only."), out FramePacing, out _);
+        SwitchRow(RowsSmooth, "V-Sync",
+                  L("Chaque image attend le rafraîchissement de l'écran : plus de déchirure de l'image, un peu plus de délai. Utile là où le pilote n'a pas de mode mailbox (AMD sous Windows). Le menu en jeu le change aussi, aussitôt.",
+                    "Each frame waits for the display's refresh: no more tearing, a little more delay. Useful where the driver has no mailbox mode (AMD on Windows). The in-game menu changes it too, at once."),
+                  out VSync, out _);
 
         // ---- game
         LanguageBox = new ComboBox { Style = St("List"), Width = 230, ItemsSource = GameLanguages.Select(l => new LangItem(l.Code, l.Name)).ToList() };
@@ -163,6 +169,8 @@ public partial class MainWindow
             },
         });
 
+        BuildShortcutRows();
+
         // ---- controls
         RowsControls.Children.Add(new TextBlock
         {
@@ -194,6 +202,135 @@ public partial class MainWindow
         });
 
         Wire();
+        foreach (var page in new Panel[] { RowsDisplay, RowsSmooth, RowsGame, RowsControls }) WireRows(page);
+    }
+
+    // ---------------------------------------------------------------- the rows as the in-game menu has them
+    // (one row selected a page: tinted in the page's colour, with what it does under it; the others one line each. A click or
+    // the keyboard's focus selects one; the arrows move and change, Q and E change pages: OptionsKey)
+    readonly Dictionary<Panel, Border> selectedRows = new();
+
+    /// The controls in a row, laid out or not (its logical children)
+    static IEnumerable<T> Within<T>(DependencyObject root) where T : DependencyObject
+    {
+        foreach (var c in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>())
+        {
+            if (c is T t) yield return t;
+            foreach (var deeper in Within<T>(c)) yield return deeper;
+        }
+    }
+    static IEnumerable<TextBlock> Styled(DependencyObject root, string style) => Within<TextBlock>(root).Where(t => t.Style == St(style));
+
+    void WireRows(Panel page)
+    {
+        var rows = page.Children.OfType<Border>().ToList();
+        foreach (var b in rows)
+        {
+            b.PreviewMouseLeftButtonDown += (_, _) => SelectRow(b);
+            b.IsKeyboardFocusWithinChanged += (_, e) => { if ((bool)e.NewValue) SelectRow(b); };
+            Look(b, false);
+        }
+        if (rows.Count > 0) SelectRow(rows[0]);
+    }
+
+    /// A row selected or not: the same height either way (the edge all round with its padding, or the rule under it with a
+    /// little more padding), so nothing moves when the selection does. Its hints stay hidden: OptionsHelp says them
+    void Look(Border b, bool on)
+    {
+        b.Background = on ? (Brush)b.FindResource("AccentTint") : Brushes.Transparent;
+        b.BorderBrush = on ? (Brush)b.FindResource("AccentEdge") : Res("Rule");
+        b.BorderThickness = on ? new Thickness(1.5) : new Thickness(0, 0, 0, 1);
+        b.Padding = on ? new Thickness(12, 8, 12, 8) : new Thickness(13.5, 9.5, 13.5, 9);
+        b.CornerRadius = new CornerRadius(on ? 10 : 0);
+        b.Margin = new Thickness(0);
+        foreach (var h in Styled(b, "RowHint")) h.Visibility = Visibility.Collapsed;
+        foreach (var l in Styled(b, "RowLabel")) l.FontWeight = on ? FontWeights.Bold : FontWeights.Normal;
+    }
+
+    void SelectRow(Border b)
+    {
+        if (b.Parent is not Panel page) return;
+        if (selectedRows.TryGetValue(page, out var was) && was == b) return;
+        if (was != null) Look(was, false);
+        selectedRows[page] = b;
+        Look(b, true);
+        b.BringIntoView();
+        ShowRowHelp();
+    }
+
+    /// What the open page's selected row does, in the box under the rows, a bar of the page's colour at its left
+    void ShowRowHelp()
+    {
+        if (OptionsHelpText == null || !selectedRows.TryGetValue(OpenPage(), out var row)) return;
+        OptionsHelpText.Text = string.Join("\n", Styled(row, "RowHint").Select(t => t.Text).Where(t => t.Length > 0));
+        OptionsHelp.BorderBrush = (Brush)row.FindResource("Accent");
+        OptionsHelp.Visibility = OptionsHelpText.Text.Length > 0 ? Visibility.Visible : Visibility.Hidden;
+    }
+
+    Panel OpenPage() => PageDisplay.Visibility == Visibility.Visible ? RowsDisplay : PageSmooth.Visibility == Visibility.Visible ? RowsSmooth
+                      : PageGame.Visibility == Visibility.Visible ? RowsGame : RowsControls;
+
+    /// The keyboard's focus on the open page's selected row, its first control (the arrows then work at once)
+    void FocusSelectedRow()
+    {
+        if (!selectedRows.TryGetValue(OpenPage(), out var row)) return;
+        Within<Control>(row).FirstOrDefault(c => c.Focusable && c.IsEnabled && c.IsVisible)?.Focus();
+    }
+
+    void OptionsKey(object sender, KeyEventArgs e)
+    {
+        if (e.OriginalSource is ComboBox { IsDropDownOpen: true } || Keyboard.FocusedElement is ComboBoxItem) return;
+        var tabs = new[] { TabDisplay, TabSmooth, TabGame, TabControls };
+        if (e.Key is Key.Q or Key.E)
+        {
+            var at = Array.FindIndex(tabs, t => t.IsChecked == true);
+            tabs[(at + (e.Key == Key.E ? 1 : tabs.Length - 1)) % tabs.Length].IsChecked = true;
+            e.Handled = true;
+            return;
+        }
+        var page = OpenPage();
+        if (!selectedRows.TryGetValue(page, out var row)) return;
+        if (e.Key is Key.Up or Key.Down)
+        {
+            var rows = page.Children.OfType<Border>().Where(b => b.IsVisible).ToList();
+            var i = rows.IndexOf(row);
+            if (i < 0) return;
+            SelectRow(rows[(i + (e.Key == Key.Down ? 1 : rows.Count - 1)) % rows.Count]);
+            FocusSelectedRow();
+            e.Handled = true;
+        }
+        else if (e.Key is Key.Left or Key.Right)
+        {
+            var dir = e.Key == Key.Right ? 1 : -1;
+            if (Within<CheckBox>(row).FirstOrDefault(c => c.IsEnabled) is { } box) box.IsChecked = dir > 0;
+            else if (Within<Slider>(row).FirstOrDefault() is { } slider) slider.Value = Math.Clamp(slider.Value + dir * slider.SmallChange, slider.Minimum, slider.Maximum);
+            else if (Within<ComboBox>(row).FirstOrDefault() is { } list) list.SelectedIndex = Math.Clamp(list.SelectedIndex + dir, 0, list.Items.Count - 1);
+            else
+            {
+                var choices = Within<RadioButton>(row).Where(r => r.IsEnabled && r.Visibility == Visibility.Visible).ToList();
+                var at = choices.FindIndex(r => r.IsChecked == true);
+                if (choices.Count > 0) choices[Math.Clamp(at + dir, 0, choices.Count - 1)].IsChecked = true;
+            }
+            e.Handled = true;
+        }
+    }
+
+    // ---------------------------------------------------------------- Home's cards: what Play will show, in a line each
+    void UpdateHero()
+    {
+        var res = s.Resolution switch { 1 => L("Native", "Native"), 0 => L("Automatique", "Automatic"), 2 => "75 %", 3 => "67 %", 5 => "58 %", 4 => "50 %", _ => "" };
+        var up = s.Upscaler switch { 3 => "AMD FSR", 4 => L("AMD FSR, AA natif", "AMD FSR native AA"), 1 => "NVIDIA DLSS", 2 => "NVIDIA DLAA", _ => L("Celui du jeu", "The game's own") };
+        LooksText.Text = $"{(s.Fullscreen != 0 ? L("Plein écran", "Full screen") : L("Fenêtre", "Window"))} · {res} · {up}";
+        var rate = s.FrameRate switch { 1 => L("FPS débloqués", "Unlocked fps"), 2 => L("30 fps réguliers", "Even 30 fps"), _ => "60 fps" };
+        MovesText.Text = s.FrameGeneration >= 2 ? $"{rate} · ×{s.FrameGeneration}" : rate;
+        LooksSub.Text = L($"Netteté {s.Sharpness} %", $"Sharpness {s.Sharpness} %") + (s.Ultrawide != 0 ? L(" · ultra-large", " · ultrawide") : "");
+        MovesSub.Text = (s.FrameGeneration >= 2 ? L("Génération d'images", "Frame generation") : L("Sans génération d'images", "No frame generation")) +
+                        (s.VSync != 0 ? " · V-Sync" : "");
+        // (the sky's line: once, after an install or an update, what the first start does; the rest of the time the name's)
+        HeroSub.Text = justBuilt ? L("Prêt à jouer ! Le premier lancement prépare les shaders pour votre carte graphique : une fois, environ 15 minutes.",
+                                     "Ready to play! The first start prepares the shaders for your graphics card: once, about 15 minutes.")
+                                 : L("recompilé pour votre PC", "recompiled for your PC");
+        UpdateHomeCards();
     }
 
     void Keys(string title, (string Key, string What)[] list)
@@ -234,6 +371,7 @@ public partial class MainWindow
         OnSwitch(FpsCounter, v => s.FpsCounter = v ? 1 : 0);
         OnSwitch(Ultrawide, v => s.Ultrawide = v ? 1 : 0);
         OnSwitch(FramePacing, v => s.FramePacing = v ? 1 : 0);
+        OnSwitch(VSync, v => s.VSync = v ? 1 : 0);
         OnSwitch(Audio, v => s.Audio = v);
         OnSwitch(Handheld, v => s.Handheld = v ? 1 : 0);
         OnSwitch(InvertY, v => s.InvertY = v);
@@ -271,6 +409,7 @@ public partial class MainWindow
         FpsCounter.IsChecked = s.FpsCounter != 0;
         Ultrawide.IsChecked = s.Ultrawide != 0;
         FramePacing.IsChecked = s.FramePacing != 0;
+        VSync.IsChecked = s.VSync != 0;
         Audio.IsChecked = s.Audio;
         Handheld.IsChecked = s.Handheld != 0;
         InvertY.IsChecked = s.InvertY;
@@ -301,24 +440,9 @@ public partial class MainWindow
             if ((int)r.Tag is 1 or 2) r.Visibility = s.NvidiaDlss || s.Upscaler is 1 or 2 ? Visibility.Visible : Visibility.Collapsed;
         // (frame generation fills the display's own refresh: no switch to 60 Hz then)
         Display60.IsEnabled = display60Possible && s.FrameGeneration < 2;
-        if (view is View.Home or View.Ready) MainNote.Text = PlaySummary();
+        UpdateHero();
+        ShowRowHelp();
         ShowChecks();
-    }
-
-    /// What Play will do, in one line under the button
-    string PlaySummary()
-    {
-        var parts = new List<string> { s.Fullscreen != 0 ? L("plein écran", "full screen") : L("fenêtre", "window") };
-        if (s.Display60 && origHz != 60 && origHz > 0 && display60Possible && s.FrameGeneration < 2) parts.Add(L("écran à 60 Hz", "display at 60 Hz"));
-        if (s.FrameGeneration >= 2) parts.Add(L($"images ×{s.FrameGeneration}", $"frames ×{s.FrameGeneration}"));
-        else parts.Add(s.FrameRate switch
-        {
-            1 => L("images débloquées", "unlocked frame rate"),
-            2 => L("30 images par seconde, régulières", "30 even frames a second"),
-            _ => L("60 images par seconde", "60 frames a second"),
-        });
-        var line = string.Join(", ", parts);
-        return char.ToUpper(line[0]) + line[1..] + ".";
     }
 
     void Changed()
@@ -339,43 +463,32 @@ public partial class MainWindow
         try { if (s.Folder != "") s.LoadGame(); } catch (Exception) { }
         ShowSettings();
         UpdateScreen();
-        MainButton.IsEnabled = Game.Installed(s.Folder) && game == null;
-        MainNote.Text = PlaySummary();
+        MainNote.Text = "";
         var version = s.Folder == "" ? null : Game.Version(s.Folder);
-        StatusText.Text = version != null ? L($"Version {version}.", $"Version {version}.") : L("Jeu construit depuis les sources.", "Game built from the sources.");
-        UpdateLink.Visibility = Visibility.Collapsed;
+        if (version != null) Card(version);   // (its state, up to date or not, once CheckLatest knows it)
+        else ShowVersion(null, null, false, true);
+        UpdateSide();
         ShowMods();
     }
 
     /// Exefs mods (ExefsMods.cs): the code patches in the folder's mods take effect when the game is built. When they are not
-    /// the ones it was built with, a line under the version says so, with Build again (or, for a folder that keeps no game
-    /// files, install again). preview: the snapshot's (2 patch files)
+    /// the ones it was built with, or the last build left some without effect, a badge on Mods says so; the Mods page says what,
+    /// with Build again. preview: the snapshot's (2 patch files)
     void ShowMods(int preview = 0)
     {
         var folder = s.Folder;
-        var count = preview;
-        var changed = preview > 0 || (folder != "" && Game.Installed(folder) && ExefsMods.Changed(folder, out count));
-        ModsRow.Visibility = changed ? Visibility.Visible : Visibility.Collapsed;
-        if (!changed) return;
-        var rebuild = preview > 0 || Game.KeepsGameFiles(folder);
-        ModsText.Text = rebuild ? L("Mods exefs modifiés depuis la construction.", "Exefs mods changed since the last build.")
-                                : L("Mods exefs modifiés : installez de nouveau le jeu.", "Exefs mods changed: install the game again.");
-        RebuildLink.Visibility = rebuild ? Visibility.Visible : Visibility.Collapsed;
-        var what = count == 0 ? L("Il n'y a plus de patch de code dans mods : le jeu garde ceux avec lesquels il a été construit.",
-                                  "There are no code patches in mods now: the game keeps the ones it was built with.")
-                 : count == 1 ? L("1 patch de code (.ips, .pchtxt) dans mods.", "1 code patch (.ips, .pchtxt) in mods.")
-                 : L($"{count} patchs de code (.ips, .pchtxt) dans mods.", $"{count} code patches (.ips, .pchtxt) in mods.");
-        ModsText.ToolTip = new ToolTip
-        {
-            Style = St("Tip"),
-            Content = what + " " + L("ReLink traduit le code du jeu quand il le construit : un patch de code ne compte qu'une fois le jeu reconstruit.",
-                                     "ReLink translates the game's code when it builds the game: a code patch takes effect once the game is built again."),
-        };
+        var changed = preview > 0 || (folder != "" && Game.Installed(folder) && ExefsMods.Changed(folder, out _));
+        var problems = preview == 0 && folder != "" && PatchProblems(folder).Count > 0;
+        ModsBadge.Visibility = changed || problems ? Visibility.Visible : Visibility.Collapsed;
+        modsToBuild = changed;
+        UpdateHomeCards();
     }
+
+    bool modsToBuild;
 
     void RebuildClick(object sender, RoutedEventArgs e)
     {
-        if (game != null || !Game.Installed(s.Folder) || !Game.KeepsGameFiles(s.Folder)) return;
+        if (game != null || runner != null || !Game.Installed(s.Folder) || !Game.KeepsGameFiles(s.Folder)) return;
         var tools = Tools.Find();
         if (tools == null)
         {
@@ -441,23 +554,8 @@ public partial class MainWindow
         latestTag = await Updater.LatestTag();
         if (view != View.Home || folder != s.Folder) return;
         updateTarget = latestTag ?? Tools.Find()?.Version;
-        UpdateLink.Visibility = Visibility.Collapsed;
-        if (version == null)
-        {
-            StatusText.Text = latestTag != null ? L($"Jeu construit depuis les sources. Dernière version publiée : {latestTag}.", $"Game built from the sources. Latest release: {latestTag}.")
-                                                : L("Jeu construit depuis les sources.", "Game built from the sources.");
-            return;
-        }
-        if (updateTarget == null) StatusText.Text = L($"Version {version}. Les mises à jour n'ont pas pu être vérifiées.", $"Version {version}. Updates could not be checked.");
-        else if (version != updateTarget && Game.KeepsGameFiles(folder))
-        {
-            StatusText.Text = L($"Version {version}. La {updateTarget} est disponible.", $"Version {version}. {updateTarget} is available.");
-            UpdateLink.Visibility = Visibility.Visible;
-        }
-        else if (version != updateTarget)
-            StatusText.Text = L($"Version {version}. La {updateTarget} est sortie : installez de nouveau le jeu pour l'obtenir.", $"Version {version}. {updateTarget} is out: install the game again to get it.");
-        else StatusText.Text = latestTag == null ? L($"Version {version}. Les mises à jour n'ont pas pu être vérifiées.", $"Version {version}. Updates could not be checked.")
-                                                 : L($"Version {version}, à jour.", $"Version {version}, up to date.");
+        MainNote.Text = "";
+        ShowVersion(version, version == null ? latestTag : updateTarget, version != null && Game.KeepsGameFiles(folder), @checked: latestTag != null || version == null);
     }
 
     void UpdateClick(object sender, RoutedEventArgs e)
@@ -469,8 +567,8 @@ public partial class MainWindow
     // ---------------------------------------------------------------- play
     void Play()
     {
-        var folder = view == View.Ready && finished.Length > 0 ? finished : s.Folder;
-        if (game != null || !Game.Installed(folder)) return;
+        var folder = s.Folder;
+        if (game != null || runner != null || !Game.Installed(folder)) return;
         s.Folder = folder;
         try { s.Save(); }
         catch (Exception ex) { MainNote.Text = L("Réglages non enregistrés : ", "Settings not saved: ") + ex.Message; return; }
@@ -503,6 +601,7 @@ public partial class MainWindow
         game.EnableRaisingEvents = true;
         game.Exited += (_, _) => Dispatcher.BeginInvoke(GameEnded);
         MainButton.IsEnabled = false;
+        justBuilt = false;
         ShowPlaying(screenNote == "" ? L("Le jeu tourne.", "The game is running.") : screenNote);
         WindowState = WindowState.Minimized;
     }

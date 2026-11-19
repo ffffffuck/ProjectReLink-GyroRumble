@@ -57,7 +57,7 @@ static class Storage
 
     /// What a build makes in its work folder (make_game.py, lift.py, build.py)
     static IEnumerable<string> WorkParts(string work) =>
-        new[] { "objcache", "sa", "exefs", "probe", "image", "system_headers.txt", "hot_funcs.txt", "hot_order.txt", "relink_pieces.prof", "relink_vk.profdata", "relink.res" }
+        new[] { "objcache", "sa", "lift_kept", "exefs", "probe", "image", "system_headers.txt", "hot_funcs.txt", "hot_order.txt", "relink_pieces.prof", "relink_vk.profdata", "relink.res" }
             .Select(n => Path.Combine(work, n));
 
     /// The launcher versions that stay: the one installed last (current.txt) and the one running
@@ -75,7 +75,7 @@ static class Storage
     /// What Free lets go
     static IEnumerable<string> Freeable()
     {
-        foreach (var d in new[] { "objcache", "sa", "exefs", "probe" })
+        foreach (var d in new[] { "objcache", "sa", "lift_kept", "exefs", "probe" })
             yield return Path.Combine(Work, d);
         foreach (var d in new[] { "downloads", "update" })
             yield return Path.Combine(Base, d);

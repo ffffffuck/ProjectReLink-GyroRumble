@@ -28,6 +28,22 @@ volatile LONG64 hos_present_count;   /* (nvn_native.c: the game's presents) */
 static HWND hwnd;
 static int renderer;   /* the renderer presents into the window */
 
+/* (relink, issue 65) While the game's window is the active one, Windows keeps the display on and starts neither the screen saver
+   nor sleep: a controller is not activity for Windows, so with a pad the screen went dark in the middle of a cutscene or a long
+   talk. Let go as soon as the window is not the active one or is minimized. Checked on the window's 250 ms timer as well as on
+   WM_ACTIVATE: the window is shown, and so activated, before the renderer starts, and 0.7.8 to 0.7.9.1 only asked on
+   WM_ACTIVATE once the renderer was up, so a player who never switched windows never had it. HOS_KEEP_AWAKE=0: off */
+static void keep_awake_check(HWND w) {
+    static int keep = -1, held;
+    if (keep < 0) keep = !(getenv("HOS_KEEP_AWAKE") && atoi(getenv("HOS_KEEP_AWAKE")) == 0);
+    const int want = keep && renderer && GetForegroundWindow() == w && !IsIconic(w);
+    if (want == held) return;
+    held = want;
+    SetThreadExecutionState(want ? ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED : ES_CONTINUOUS);
+    hos_log("display: %s", want ? "the display is kept on while the game's window is the active one"
+                                : "the display may sleep again (the game's window is not the active one)");
+}
+
 /* mouse capture: raw motion accumulated here, taken by nn_hid.c */
 static volatile LONG mouse_dx, mouse_dy;
 static volatile LONG mouse_captured;
@@ -311,6 +327,7 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         menu_mouse(w, (int)wp);
         return 0;
     case WM_TIMER:
+        keep_awake_check(w);
         return 0;
     case WM_SYSCOMMAND:
         if ((wp & 0xFFF0) == SC_SCREENSAVE && !(wp & SCF_ISSECURE) &&
@@ -340,7 +357,11 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         extern void hos_vk_note_key_press(unsigned key);
         if (!(lp & (1 << 30))) hos_vk_note_key_press((unsigned)wp);
         if (wp == VK_ESCAPE) mouse_capture(w, 0);
-        if (wp == VK_F11 && !(lp & (1 << 30))) set_fullscreen(w, !fullscreen);
+        {   /* (relink) the Gameplay tab's Fullscreen key row (F11 by default, 0: none); F11 before the renderer answers */
+            int rx_option(int id, int otherwise);
+            const int full_key = rx_option(73, VK_F11);   /* (HOS_OPT_KEY_FULLSCREEN, gpu/vk/vk_menu.h) */
+            if (full_key && (int)wp == full_key && !(lp & (1 << 30))) set_fullscreen(w, !fullscreen);
+        }
         return 0;
     }
     case WM_SYSKEYDOWN:   /* Alt+Enter, as on Linux (display_sdl.c); other Alt keys (Alt+F4) go on to Windows */
@@ -362,17 +383,9 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
         return 0;
-    case WM_ACTIVATE: {
-        /* (relink, issue 65) While the game's window is the active one, Windows keeps the display on and starts neither the
-           screen saver nor sleep: a controller is not activity for Windows, so with a pad the screen went dark in the middle
-           of a cutscene or a long talk. Let go as soon as the window is not the active one. HOS_KEEP_AWAKE=0: off */
-        static int keep = -1;
-        if (keep < 0) keep = !(getenv("HOS_KEEP_AWAKE") && atoi(getenv("HOS_KEEP_AWAKE")) == 0);
-        if (keep && renderer)
-            SetThreadExecutionState(LOWORD(wp) != WA_INACTIVE ? ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED
-                                                              : ES_CONTINUOUS);
+    case WM_ACTIVATE:
+        keep_awake_check(w);   /* (issue 65: also on the timer) */
         break;
-    }
     case WM_KILLFOCUS:
     case WM_CANCELMODE:
         mouse_capture(w, 0);

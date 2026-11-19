@@ -561,6 +561,8 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
         AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
         AddExtension("SPV_KHR_physical_storage_buffer");
         SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
+        // (the batch's first workgroup: read by the stage whose workgroup index is the draw's, the task, or a mesh stage alone)
+        wants_mesh_fallback_base = stage == Stage::Task || !runtime_info.mesh_fallback_task;
         DefineRescalingInputPushConstant();
     }
     if (runtime_info.mesh_fallback_vertex) {   // (the generated vertex stage: pushes the records' address)
@@ -1593,6 +1595,10 @@ void EmitContext::DefineRescalingInputPushConstant() {
         members.push_back(F32[1]);
         rescaling_downfactor_member_index = member_index++;
     }
+    if (wants_mesh_fallback_base) {   // (relink, issue 640: after down_factor, in its block's padding)
+        members.push_back(U32[1]);
+        mesh_fallback_base_member_index = member_index++;
+    }
     if (wants_guest_pages) {
         members.push_back(U64);
         guest_pages_member_index = member_index++;
@@ -1625,6 +1631,10 @@ void EmitContext::DefineRescalingInputPushConstant() {
                        static_cast<u32>(offsetof(RescalingLayout, down_factor)));
         MemberName(push_constant_struct, rescaling_downfactor_member_index, "down_factor");
     }
+    if (wants_mesh_fallback_base) {
+        MemberDecorate(push_constant_struct, mesh_fallback_base_member_index, spv::Decoration::Offset, MESH_FALLBACK_BASE_PUSH_OFFSET);
+        MemberName(push_constant_struct, mesh_fallback_base_member_index, "mesh_fallback_base");
+    }
     if (wants_guest_pages) {
         MemberDecorate(push_constant_struct, guest_pages_member_index, spv::Decoration::Offset, GUEST_PAGES_PUSH_OFFSET);
         MemberName(push_constant_struct, guest_pages_member_index, "guest_pages");
@@ -1651,6 +1661,11 @@ void EmitContext::DefineRescalingInputPushConstant() {
     if (profile.supported_spirv >= 0x00010400) {
         interfaces.push_back(rescaling_push_constants);
     }
+}
+
+Id EmitContext::MeshFallbackBase() {
+    const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, U32[1])};
+    return OpLoad(U32[1], OpAccessChain(pointer_type, rescaling_push_constants, Const(mesh_fallback_base_member_index)));
 }
 
 Id EmitContext::MeshFallbackWord(Id address) {

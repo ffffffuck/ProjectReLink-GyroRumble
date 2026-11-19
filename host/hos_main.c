@@ -83,6 +83,18 @@ static void process_priority(void) {
                                              repeats 0.51 and 0.36 a second against 0.65 and 0.55) */
     const DWORD cls = level >= 2 ? HIGH_PRIORITY_CLASS : level == 1 ? ABOVE_NORMAL_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS;
     if (level > 0 && SetPriorityClass(GetCurrentProcess(), cls)) hos_log("process priority class: %s", level >= 2 ? "high" : "above normal");
+    /* (relink, HOS_GPU_PRIORITY=<n>, experiment; unset or 0: left alone) the process's class in the GPU's own scheduler, which
+       is apart from the CPU's: 1 above normal, 2 high (never realtime: it needs a privilege and can starve the desktop). The
+       game's GPU work then goes before the desktop's and other windows' when both wait for the card */
+    const char *g = getenv("HOS_GPU_PRIORITY");
+    const int glevel = g ? atoi(g) : 0;
+    if (glevel > 0) {
+        HMODULE gdi = LoadLibraryA("gdi32.dll");
+        typedef LONG (WINAPI *SetClass)(HANDLE, int);
+        SetClass set = gdi ? (SetClass)(void *)GetProcAddress(gdi, "D3DKMTSetProcessSchedulingPriorityClass") : NULL;
+        const LONG st = set ? set(GetCurrentProcess(), glevel >= 2 ? 4 : 3) : -1;   /* (the classes: 2 normal, 3 above, 4 high) */
+        hos_log("GPU scheduling class: %s (%s)", glevel >= 2 ? "high" : "above normal", st == 0 ? "set" : "refused");
+    }
 }
 #endif
 
@@ -415,6 +427,9 @@ static void load_relink_env(void) {
 
 int hos_oot_protect_hearts;
 volatile int hos_oot_live_action;   /* (test runs) the live input file's "!cheat <action>": host/nn_hid.c */
+/* (test runs) the live input file's "!pos x y z": Link moved there, as the mark and return cheats move him (actions 2, 3) */
+volatile int hos_oot_live_pos_pending;
+volatile float hos_oot_live_pos[3];
 
 int hos_oot_hearts_enabled(void) {
     int rx_option(int id, int otherwise);
@@ -1104,6 +1119,13 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
     A64Fn change_position = a64_lookup(0x806d2530ULL);
     if (!change_position) return;
 
+    if (action == 3 && __atomic_exchange_n(&hos_oot_live_pos_pending, 0, __ATOMIC_ACQ_REL)) {
+        /* (test runs, the live input file's "!pos x y z": host/nn_hid.c) the mark set there, then the return below moves Link */
+        memcpy(mark, (const float *)hos_oot_live_pos, sizeof mark);
+        marked_actor = actor;
+        marked_controller = controller;
+        hos_log("cheats: position set by the live input to %.2f %.2f %.2f", mark[0], mark[1], mark[2]);
+    }
     if (action == 2) {
         for (unsigned i = 0; i < 3; i++) {
             const uint32_t bits = recomp_load32(c, actor + 796 + i * 4);

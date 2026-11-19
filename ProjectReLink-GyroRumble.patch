@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 95b414b..18c3f96 100644
+index 4af9f94..5e97a54 100644
 --- a/README.md
 +++ b/README.md
 @@ -8,13 +8,18 @@ remake) into a native Windows game: the game's code is translated to PC code and
@@ -31,7 +31,7 @@ index 95b414b..18c3f96 100644
  2. Run it. It downloads ReLink and its tools (about 310 MB), checks them and opens the launcher. Nothing else to install:
     ReLink brings its own compiler and Python.
  3. Pick your copy of the game. The launcher looks for `.nup` files in Downloads, Desktop and Documents; you can also choose
-@@ -319,7 +324,7 @@ Switch 2) en jeu Windows natif : le code du jeu est traduit en code PC et compil
+@@ -329,7 +334,7 @@ Switch 2) en jeu Windows natif : le code du jeu est traduit en code PC et compil
  **Ce dépôt ne contient aucun fichier du jeu** : ReLink fabrique le jeu sur votre PC à partir de votre propre copie.
  
  **Discord :** [rejoignez le serveur Project ReLink](https://discord.gg/RFNUtCQk8j) pour poser vos questions, trouver de
@@ -40,7 +40,7 @@ index 95b414b..18c3f96 100644
  `relink_log.txt` en pièce jointe reste le meilleur moyen qu'il ne se perde pas.
  
  ### La version du jeu qu'il vous faut
-@@ -330,7 +335,7 @@ d'installer quoi que ce soit.
+@@ -340,7 +345,7 @@ d'installer quoi que ce soit.
  
  ### Installer et jouer
  
@@ -63,10 +63,10 @@ index 6f326ca..7b1f72e 100644
     draws, 0 when there is to be no jitter, and the jitter sequence's length. 24 on: 18 to 22 are the motion rows' */
  enum { HOS_OPT_DLSS_JITTER_W = 24, HOS_OPT_DLSS_JITTER_H, HOS_OPT_DLSS_JITTER_PHASES };
 diff --git a/gpu/vk/vk_menu.cpp b/gpu/vk/vk_menu.cpp
-index 66f4b65..7bab192 100644
+index af33bcc..4d1ecbc 100644
 --- a/gpu/vk/vk_menu.cpp
 +++ b/gpu/vk/vk_menu.cpp
-@@ -93,6 +93,10 @@ const char* tx_framegen(int v) {
+@@ -95,6 +95,10 @@ const char* tx_framegen(int v) {
      return t[v];
  }
  const char* tx_onoff(int v) { return v ? "On" : "Off"; }
@@ -77,16 +77,16 @@ index 66f4b65..7bab192 100644
  // (relink) Motion controls: the choice, and whether a connected controller has a gyroscope (host/pad_sdl.c). Either can be
  // chosen whatever is connected: a pad plugged in later is read when it comes
  const char* tx_gyro(int v) {
-@@ -571,7 +575,7 @@ Row rows[] = {
-     {TAB_GAMEPLAY, "Cycle items", &opts.cycle_items, 0, 4, 1, tx_cycle_items,
-      "Changes the item on ZR with a tap of R or L, within its group. Holding R or L still opens the row.", hn_cycle_items},
+@@ -625,7 +629,7 @@ Row rows[] = {
+     {TAB_GAMEPLAY, "Fullscreen key", &opts.key_full, 0, kHotkeyNone, 1, tx_hotkey,
+      "Switches between the window and fullscreen. Alt+Enter does too.", hn_hotkey, false, true},
  
 -    // Controls (17 rows)
 +    // Controls (18 rows)
      {TAB_CONTROLS, "Controller in background", &opts.pad_background, 0, 1, 1, tx_onoff,
       "Whether the controller plays the game while another window has the focus.", hn_background},
      {TAB_CONTROLS, "Mouse camera", &opts.mouse_native, 0, 1, 1, tx_mousecam, "How the captured mouse turns the camera.",
-@@ -605,6 +609,8 @@ Row rows[] = {
+@@ -659,6 +663,8 @@ Row rows[] = {
       nullptr, false, true},
      {TAB_CONTROLS, "Invert motion Y", &opts.gyro_inv_y, 0, 1, 1, tx_onoff, "Turns the motion aim's up and down around.",
       nullptr, false, true},
@@ -96,10 +96,10 @@ index 66f4b65..7bab192 100644
       "Which face button is which. Binding one yourself on the Controls page makes it Custom.", hn_pad_layout},
      {TAB_CONTROLS, "Button prompts", &opts.button_prompts, 0, 2, 1, tx_button_prompts,   // (relink: host/prompts.c)
 diff --git a/gpu/vk/vk_menu.h b/gpu/vk/vk_menu.h
-index d476e3a..773c0cb 100644
+index 3bfa4b2..ff898f7 100644
 --- a/gpu/vk/vk_menu.h
 +++ b/gpu/vk/vk_menu.h
-@@ -57,6 +57,7 @@ struct Options {
+@@ -71,6 +71,7 @@ struct Options {
      int gyro_sens_y = 100;   // the motion aim's vertical sensitivity in percent
      int gyro_inv_x = 0;   // the motion aim's horizontal turned around
      int gyro_inv_y = 0;   // the motion aim's vertical turned around
@@ -108,10 +108,10 @@ index d476e3a..773c0cb 100644
      int preset = 0;       // quality preset: 0 Custom, 1 Minimum (4GB), 2 Low (6GB), 3 Balanced (8GB), 4 High (12GB), 5 Ultra (16GB+)
      int vram_mb = 0;      // dynamic texture cache budget limit in MB
 diff --git a/gpu/vk/vk_replay.cpp b/gpu/vk/vk_replay.cpp
-index 103e45d..72a4e1d 100644
+index 9f2230b..0b10deb 100644
 --- a/gpu/vk/vk_replay.cpp
 +++ b/gpu/vk/vk_replay.cpp
-@@ -4600,6 +4600,7 @@ void fill_replay_table(MkwVkRenderer& t) {
+@@ -4816,6 +4816,7 @@ void fill_replay_table(MkwVkRenderer& t) {
          if (id == HOS_OPT_PRESENTS_SHOWN) return presents_shown.load(std::memory_order_acquire) & 0x3fffffff;   // (relink: host/nn_vi.c)
          return id == 0 ? opts.realtime : id == 1 ? menu_is_open() : id == 2 ? resolution_auto() && !dlss_full_scale() : id == 3 ? (dlss_full_scale() ? 10000 : resolution_scale()) : id == 4 ? opts.pad_background : id == 5 ? opts.text_speed : id == 6 ? opts.mouse_native :
                 id == 7 ? opts.mouse_sens : id == 8 ? opts.mouse_invert : id == 9 ? opts.rumble : id == HOS_OPT_DEADZONE_L ? opts.deadzone_l : id == HOS_OPT_DEADZONE_R ? opts.deadzone_r : id == 16 ? opts.invert_cam_x : id == 17 ? opts.invert_cam_y : id == HOS_OPT_GYRO ? opts.gyro : id == HOS_OPT_GYRO_SENS_X ? opts.gyro_sens_x : id == HOS_OPT_GYRO_SENS_Y ? opts.gyro_sens_y : id == HOS_OPT_GYRO_INV_X ? opts.gyro_inv_x : id == HOS_OPT_GYRO_INV_Y ? opts.gyro_inv_y :
@@ -750,10 +750,10 @@ index 3eb970d..f9c5c8e 100644
          }
          return;
 diff --git a/host/nn_hid.c b/host/nn_hid.c
-index d6fd95f..2a1f362 100644
+index 1d4da96..4ab8e1a 100644
 --- a/host/nn_hid.c
 +++ b/host/nn_hid.c
-@@ -938,7 +938,7 @@ HLE(_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_2
+@@ -947,7 +947,7 @@ HLE(_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_2
  }
  
  /* Handles: six-axis ones are opaque u32s; a vibration handle is {u8 style type (3 = full key), u8 npad id, u8 device
@@ -762,7 +762,7 @@ index d6fd95f..2a1f362 100644
  HLE(_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE) {
      /* (relink) OoT asks for two (a Joy-Con pair) but runs its motion path only when three come back: at two its
         third source (the console's own, through JCMS) stays dead, and that branch is what marks motion active for the
-@@ -953,7 +953,7 @@ HLE(_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util1
+@@ -962,7 +962,7 @@ HLE(_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util1
  /* SixAxisSensorState, 0x60 bytes: {i64 delta time (ns), i64 sampling number, f32 acceleration[3] (G), angular velocity[3]
     (revolutions a second), angle[3] (revolutions), direction[3][3], u32 attributes (1 connected), pad}. Newest first.
     (relink) With Motion controls on and a pad with a gyroscope (host/pad_sdl.c), the state OoT aims with
@@ -771,7 +771,7 @@ index d6fd95f..2a1f362 100644
  HLE(_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE) {
      /* (the sampling number goes up once per reading, as the hardware's does: while live it is the readings' own count,
         moved on past the last number handed out; each entry is its own reading, with the time since the one before) */
-@@ -1057,7 +1057,9 @@ static void vibration_send(uint64_t handle, uint64_t value) {
+@@ -1066,7 +1066,9 @@ static void vibration_send(uint64_t handle, uint64_t value) {
              hos_log("hid: vibration #%lld: handle %08x, low %.2f @ %.0f Hz, high %.2f @ %.0f Hz", n, G32(handle), v[0], v[1], v[2], v[3]);
          if ((++n & 4095) == 0) hos_log("hid: %lld vibration values, strongest %.2f since the last count", n, peak), peak = 0;
      }
@@ -947,13 +947,13 @@ index 77ea6c7..7ee6c21 100644
 +    ReleaseSRWLockExclusive(&hd_lock);
 +}
 diff --git a/launcher/ReLink.csproj b/launcher/ReLink.csproj
-index 61dc7dc..796c4f2 100644
+index 1600c8c..cbe6be5 100644
 --- a/launcher/ReLink.csproj
 +++ b/launcher/ReLink.csproj
 @@ -12,7 +12,7 @@
      <ApplicationManifest>app.manifest</ApplicationManifest>
      <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-     <Version>0.7.9</Version>
+     <Version>0.7.9.2</Version>
 -    <Product>Project ReLink</Product>
 +    <Product>Project ReLink GyroRumble Fix</Product>
      <Description>Project ReLink: installs, updates and starts the game</Description>
@@ -1087,7 +1087,7 @@ index d08c6fa..ce4f848 100644
                                 L"This is on GitHub's side: try again in a few minutes, or later today."
                               : L"Could not reach GitHub to get ReLink. Check your internet connection and try again.");
 diff --git a/recomplauncher.json b/recomplauncher.json
-index d034e01..f1d2d25 100644
+index eb6fa41..92d80d4 100644
 --- a/recomplauncher.json
 +++ b/recomplauncher.json
 @@ -1,8 +1,8 @@

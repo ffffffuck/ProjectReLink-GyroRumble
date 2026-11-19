@@ -11,6 +11,9 @@ and the play profile (addresses and counts made on the development PC).
         list written again with them (a first release has no parts of its own: it starts from another release's)
     python -I scripts/release_parts.py profile <setup list> <work folder>
         the play profile (tools/work of the list's profile part, or of its app part) into <work folder>
+    python -I scripts/release_parts.py cpm <setup list> <folder>
+        the list's CPM part (tools/cpm: the Vulkan, SPIR-V and VMA headers, FFmpeg) unpacked into <folder>, as a player's
+        install has it: what the workflow builds the release's own Vulkan back end with (tools/prebuilt, nx2/build.py)
     python -I scripts/release_parts.py llvm-mingw <folder> [--name]
         llvm-mingw as scripts/make_setup_parts.py names it (its official release, SHA-256 checked) unpacked into <folder>;
         prints its folder. --name: only prints its name (a cache key)
@@ -246,6 +249,16 @@ def profile(a):
     return 0
 
 
+def cpm(a):
+    part = named_part(a.list, "cpm")
+    if not part:
+        sys.exit("no cpm part in %s" % a.list)
+    n = extract(part, top_folder(part) + "/tools/cpm/", a.folder)
+    print(a.folder)
+    print("%d CPM files into %s" % (n, a.folder), file=sys.stderr)
+    return 0
+
+
 def llvm_spec():
     spec = importlib.util.spec_from_file_location("make_setup_parts", os.path.join(ROOT, "scripts", "make_setup_parts.py"))
     m = importlib.util.module_from_spec(spec)
@@ -467,6 +480,9 @@ def main():
     s = sub.add_parser("profile")
     s.add_argument("list")
     s.add_argument("work")
+    s = sub.add_parser("cpm")
+    s.add_argument("list")
+    s.add_argument("folder")
     s = sub.add_parser("llvm-mingw")
     s.add_argument("folder", nargs="?", default="")
     s.add_argument("--name", action="store_true")
@@ -483,7 +499,7 @@ def main():
     a = p.parse_args()
     if a.cmd == "previous":
         a.list_name = a.list_name or ["relink-setup.txt"]
-    return {"previous": previous, "adopt": adopt, "profile": profile, "llvm-mingw": llvm_mingw, "package": package,
+    return {"previous": previous, "adopt": adopt, "profile": profile, "cpm": cpm, "llvm-mingw": llvm_mingw, "package": package,
             "zip": full_zip}[a.cmd](a)
 
 

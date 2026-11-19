@@ -66,3 +66,25 @@ def wait_for_quiet(what="this job"):
         waited += 1
     if waited:
         print("benchmark lock gone after ~%d min" % waited, flush=True)
+
+
+LIFT_SOURCES = ".lift_sources"   # (in the lifted C's folder: the translator's own Python files the lift loaded, for its key)
+
+
+def note_sources(gen):
+    """(relink) The nx2/ Python files this process loaded, added to <gen>/.lift_sources: make_game.py's lift key reads those
+    alone of nx2/, so a change to a file the lift never loads (the builder's later steps, the tests) keeps the translated code"""
+    path = os.path.join(gen, LIFT_SOURCES)
+    names = set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            names = {line.strip() for line in f if line.strip()}
+    except OSError:
+        pass
+    here = os.path.normcase(HERE) + os.sep
+    for m in list(sys.modules.values()):
+        f = getattr(m, "__file__", None)
+        if f and os.path.normcase(os.path.abspath(f)).startswith(here) and f.endswith(".py"):
+            names.add(os.path.relpath(os.path.abspath(f), HERE).replace(os.sep, "/"))
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("".join(n + "\n" for n in sorted(names)))

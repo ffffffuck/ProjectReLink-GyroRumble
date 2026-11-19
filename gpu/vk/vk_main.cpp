@@ -26,7 +26,9 @@
 #include "vk_fsr.h"
 #include "vk_reflex.h"
 #include "vk_progress.h"
-#include "vk_push_fix.h"
+#ifdef _WIN32
+#include <dxgi1_6.h>   // (relink: HDR output, hdr_display)
+#endif
 
 namespace vkx {
 #define VKX_DEFINE(f) PFN_##f f;
@@ -80,6 +82,12 @@ void logf(const char* fmt, ...) {
     va_end(a);
     if (host) host->log(b);
 }
+
+// (relink) HDR output: VK_EXT_swapchain_colorspace enabled on the instance (the player asked for HDR and the loader has it), and
+// whether the swapchain now is HDR10 (A2B10G10R10, ST 2084) with the display's peak in nits (hdr_output, hdr_peak_nits)
+bool hdr_ext = false;
+std::atomic<int> hdr_state{0}, hdr_peak{0};
+bool hdr_display(float* peak);
 
 namespace {
 
@@ -150,35 +158,6 @@ void guard_shader_modules() {
 void guard_shader_modules() {}
 #endif
 
-// (relink, issue 640) The mesh shader fallback's task programs read the task payloads' address from the push constants by the
-// member's byte offset (64) where SPIR-V takes the member's index (3): an access chain past the block's last member. Such a module
-// is invalid, and NVIDIA's compiler faulted on it (vkCreateComputePipelines, "a fault in the driver", 10 ms). A GTX 1060's and a
-// GTX 1070's logs ended there: their first task + mesh draw (a5da9f84b72d1471, Kokiri Forest after a save is loaded) "could not be
-// made", the next fallback compile never returned, and the picture stayed black with the game running behind it. Measured with
-// RX_VK_FORCE_MESH_FALLBACK=1 on an RTX 3060 Ti: the same fault on a5da9f84b72d1471, then the render thread's last line. The
-// translator makes them so, and the program caches players have keep them: here, as each module is made, such an index becomes
-// the index of the member at that offset (vk_push_fix.h). Only on a GPU that runs the fallback. RX_VK_NO_PUSH_FIX=1: the modules
-// as they are
-PFN_vkCreateShaderModule unfixed_create_shader_module = nullptr;
-std::atomic<int> push_fixes_told{0};
-VKAPI_ATTR VkResult VKAPI_CALL fixing_create_shader_module(VkDevice d, const VkShaderModuleCreateInfo* ci,
-                                                           const VkAllocationCallbacks* a, VkShaderModule* m) {
-    std::vector<uint32_t> w;
-    const size_t fixed = ci && ci->pCode && !(ci->codeSize % 4) ? push_offset_fix(ci->pCode, ci->codeSize / 4, w) : 0;
-    if (!fixed) return unfixed_create_shader_module(d, ci, a, m);
-    if (push_fixes_told++ < 4)
-        logf("vk: fallback: %zu push constant access%s by byte offset made by member index (issue 640)", fixed, fixed == 1 ? "" : "es");
-    VkShaderModuleCreateInfo with = *ci;
-    with.pCode = w.data();
-    with.codeSize = w.size() * 4;
-    return unfixed_create_shader_module(d, &with, a, m);
-}
-void fix_fallback_modules() {
-    if (!dev.mesh_fallback || getenv("RX_VK_NO_PUSH_FIX") || !vkx::vkCreateShaderModule) return;
-    unfixed_create_shader_module = vkx::vkCreateShaderModule;   // (the guard's, or the driver's)
-    vkx::vkCreateShaderModule = fixing_create_shader_module;
-}
-
 bool has_extension(const std::vector<VkExtensionProperties>& all, const char* name) {
     for (const auto& e : all)
         if (!std::strcmp(e.extensionName, name)) return true;
@@ -221,6 +200,12 @@ bool create_instance() {
         std::vector<VkExtensionProperties> all(n);
         vkEnumerateInstanceExtensionProperties(nullptr, &n, all.data());
         dlss_instance_extensions(ext_list, all);
+        // (relink) HDR: the colour spaces of the ST 2084 swapchain, only when the HDR row is on (nothing changes otherwise)
+        if (hdr_wanted()) {
+            hdr_ext = has_extension(all, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+            if (hdr_ext) ext_list.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+            else logf("vk: HDR asked for, but the Vulkan loader has no VK_EXT_swapchain_colorspace: the picture stays SDR");
+        }
     }
     ci.enabledExtensionCount = (uint32_t)ext_list.size();
     ci.ppEnabledExtensionNames = ext_list.data();
@@ -589,8 +574,14 @@ bool create_device() {
         const bool pin = f13.subgroupSizeControl && sc.minSubgroupSize <= 32 && sc.maxSubgroupSize >= 32 && !getenv("RX_VK_NO_SUBGROUP_PIN");
         dev.sg32_stages = pin ? sc.requiredSubgroupSizeStages : 0;
         amd_gcn = dev.props.vendorID == 0x1002 && sc.minSubgroupSize == 64 && sc.maxSubgroupSize == 64;   // (issue 43)
-        logf("vk: subgroups: default %u lanes, %u-%u, pinned to 32 on stages %#x", sg.subgroupSize, sc.minSubgroupSize, sc.maxSubgroupSize,
-             (unsigned)dev.sg32_stages);
+        // (relink, Discord: Artspear, the dogs drawn without textures on an RX 6600) AMD's RDNA cards hold only compute work to 32
+        // lanes (requiredSubgroupSizeStages 0x20): their drawing stages run 64 wide where the driver likes, and a program's lane
+        // votes, ballots and shuffles, written for 32, mixed two groups. Such GPUs translate with the wide-warp form
+        const VkShaderStageFlags drawing = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        dev.big_warp = std::max(sg.subgroupSize, sc.maxSubgroupSize) > 32 && (dev.sg32_stages & drawing) != drawing &&
+                       !getenv("RX_VK_NO_BIG_WARP");
+        logf("vk: subgroups: default %u lanes, %u-%u, pinned to 32 on stages %#x%s", sg.subgroupSize, sc.minSubgroupSize, sc.maxSubgroupSize,
+             (unsigned)dev.sg32_stages, dev.big_warp ? "; the drawing stages may run wider: translated for it" : "");
     }
     if (!f13.dynamicRendering || !f13.synchronization2 || !f12.timelineSemaphore) {
         logf("vk: the GPU lacks dynamic rendering, synchronization2 or timeline semaphores");
@@ -659,7 +650,6 @@ bool create_device() {
 
     load_device(dev.device);
     guard_shader_modules();   // (relink, issue 43)
-    fix_fallback_modules();   // (relink, issue 640: after the guard, through it)
     vkGetDeviceQueue(dev.device, dev.queue_family, 0, &dev.queue);
     dev.present_queue = VK_NULL_HANDLE;
     dev.present_family = dev.queue_family;
@@ -719,6 +709,40 @@ bool create_swapchain(uint32_t width, uint32_t height) {
         if ((f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_R8G8B8A8_UNORM) &&
             f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
             fmt = f;
+    {   // (relink) HDR output: HDR10 words (the game's own HDR window textures are RGB10A2 holding PQ BT.2020: host/nn_vi.c tells
+        // it the display is HDR from hdr_output) when the row is on, the surface lists them and Windows' HDR is on for the display
+        bool hdr_now = false;
+        if (hdr_ext && hdr_wanted()) {
+            float peak = 0;
+            // (RX_VK_HDR_FORCE=1, tests: the display's answer left out, the surface's formats alone decide)
+            static const bool force = getenv("RX_VK_HDR_FORCE") && atoi(getenv("RX_VK_HDR_FORCE")) != 0;
+            const bool display_hdr = hdr_display(&peak) || force;
+            static bool listed = false;
+            if (!listed) {
+                listed = true;
+                std::string all;
+                for (const auto& f : formats) all += " " + std::to_string((int)f.format) + "/" + std::to_string((int)f.colorSpace);
+                logf("vk: HDR: the surface's formats (format/colour space):%s", all.c_str());
+            }
+            const VkSurfaceFormatKHR* found = nullptr;
+            for (const auto& f : formats)
+                if (f.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 && f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) found = &f;
+            static int told = -1;
+            const int tell = !found ? 1 : !display_hdr ? 2 : 3;
+            if (tell != told) {
+                told = tell;
+                logf(tell == 1 ? "vk: HDR asked for, but this display's surface lists no HDR10 format: the picture stays SDR"
+                     : tell == 2 ? "vk: HDR asked for, but Windows' HDR is off for this display: the picture stays SDR"
+                                 : "vk: HDR output: HDR10 (ST 2084, BT.2020), the display's peak %.0f nits, paper white %d nits",
+                     peak > 0 ? peak : 1000.0f, hdr_paper_white_nits());
+            }
+            if (found && display_hdr) {
+                fmt = *found, hdr_now = true;
+                hdr_peak.store(peak > 0 ? (int)peak : 1000);
+            }
+        }
+        hdr_state.store(hdr_now ? 1 : 0);
+    }
     // mailbox when the driver has it (latest frame, no tear). The game paces itself (nn_vi.c).
     n = 0;
     result = vkGetPhysicalDeviceSurfacePresentModesKHR(dev.physical, dev.surface, &n, nullptr);
@@ -732,7 +756,8 @@ bool create_swapchain(uint32_t width, uint32_t height) {
     VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
     // (as on a card or driver with vsync forced. relink: and the "30, smooth" frame rate, whose frames are each held for the
     // same number of refreshes by presenting them again: only FIFO shows every present, one a refresh)
-    const bool force_fifo = getenv("RX_VK_FIFO") != nullptr || (fps_low_cap() > 0 && !fifo_held_for_startup.load());
+    // (relink: and the Insert menu's V-Sync, for a card whose driver has no mailbox (AMD's on Windows): immediate tears)
+    const bool force_fifo = getenv("RX_VK_FIFO") != nullptr || opts.vsync != 0 || (fps_low_cap() > 0 && !fifo_held_for_startup.load());
     if (!force_fifo) {
         for (auto m : modes)
             if (m == VK_PRESENT_MODE_MAILBOX_KHR) mode = m;
@@ -830,6 +855,52 @@ bool create_swapchain(uint32_t width, uint32_t height) {
 namespace {
 HWND main_window = nullptr;
 } // namespace
+
+bool hdr_wanted() {
+    static const int env = getenv("RX_VK_HDR") && *getenv("RX_VK_HDR") ? (atoi(getenv("RX_VK_HDR")) != 0 ? 1 : 0) : -1;
+    if (env >= 0) return env == 1;
+    menu_init();   // (the options file, once: create_instance asks before pick_device does)
+    return opts.hdr != 0;
+}
+bool hdr_output() { return hdr_state.load(std::memory_order_relaxed) == 1; }
+int hdr_peak_nits() {
+    const int p = hdr_peak.load(std::memory_order_relaxed);
+    return p > 0 ? p : 1000;
+}
+/// (relink) Whether Windows' HDR is on for the display the window is on (DXGI 1.6: its colour space is ST 2084 / BT.2020), and that
+/// display's peak brightness. True when it cannot be told (no DXGI 1.6, the display not found): the surface's formats decide then
+bool hdr_display(float* peak) {
+    *peak = 0;
+#ifdef _WIN32
+    HMONITOR mon = main_window ? MonitorFromWindow(main_window, MONITOR_DEFAULTTOPRIMARY) : nullptr;
+    static HMODULE dxgi = LoadLibraryA("dxgi.dll");
+    using Create = HRESULT(WINAPI*)(REFIID, void**);
+    const Create create = dxgi ? (Create)(void*)GetProcAddress(dxgi, "CreateDXGIFactory1") : nullptr;
+    IDXGIFactory1* factory = nullptr;
+    if (!mon || !create || FAILED(create(__uuidof(IDXGIFactory1), (void**)&factory)) || !factory) return true;
+    int on = -1;
+    IDXGIAdapter1* adapter = nullptr;
+    for (UINT a = 0; on < 0 && factory->EnumAdapters1(a, &adapter) == S_OK; a++) {
+        IDXGIOutput* out = nullptr;
+        for (UINT o = 0; on < 0 && adapter->EnumOutputs(o, &out) == S_OK; o++) {
+            IDXGIOutput6* out6 = nullptr;
+            DXGI_OUTPUT_DESC1 d{};
+            if (SUCCEEDED(out->QueryInterface(__uuidof(IDXGIOutput6), (void**)&out6)) && out6 && SUCCEEDED(out6->GetDesc1(&d)) &&
+                d.Monitor == mon) {
+                on = d.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 ? 1 : 0;
+                *peak = d.MaxLuminance;
+            }
+            if (out6) out6->Release();
+            out->Release();
+        }
+        adapter->Release();
+    }
+    factory->Release();
+    return on != 0;
+#else
+    return true;
+#endif
+}
 
 std::atomic<int> presents_shown{0};
 std::atomic<int> low_cap_mfps{0};
@@ -977,6 +1048,8 @@ void prepare_with_screen() {
         int eta_stage = -1;
         double next_log = 10;
         bool prepared = false;   // (this start prepares the programs: a first start after an update, two steps)
+        double finished_at = -1;   // (when the work ended: the staff's ending is played for kStartupOutro seconds after it)
+        bool staff_shown = false;   // (the screen showed the staff open: a start that lasted past its first second)
         uint32_t last_w = dev.swap_extent.width, last_h = dev.swap_extent.height;
         for (;;) {
             const bool finished = prep_finished.load(std::memory_order_acquire);
@@ -995,7 +1068,12 @@ void prepare_with_screen() {
             StartupState st;
             st.stage = stage, st.done = done, st.total = total, st.left = left, st.secs = secs;
             st.prepared = prepared, st.finished = finished, st.stopping = prepare_stopped();
-            const StartupView view = startup_view(st);
+            if (finished && finished_at < 0) finished_at = secs;
+            if (!finished && secs >= 1.0) staff_shown = true;
+            st.staff_shown = staff_shown;
+            st.since_finished = finished ? secs - finished_at : -1;
+            StartupView view = startup_view(st);
+            view.gpu = dev.props.deviceName;
             startup_screen(&view);
             uint32_t w, h;
             window_size(&w, &h);
@@ -1004,8 +1082,16 @@ void prepare_with_screen() {
                 last_w = w, last_h = h;
             }
             if (w && h) present_image(nullptr, dev.swap_extent.width, dev.swap_extent.height, nullptr);
-            if (finished || paint_stop.load()) break;
-            Sleep(33);
+            // (the staff's ending, played in full before the game takes the window, however early the work ended; a stop
+            // asked by closing does not wait. Drawn at about 60 frames a second meanwhile: it is a moving picture)
+            const bool closing = finished && staff_shown && !st.stopping && secs - finished_at < kStartupOutro;
+            if ((finished || paint_stop.load()) && !closing) break;
+            if (!finished) Sleep(33);
+            else {   // (the ending: a frame every sixtieth of a second, counted from its start, whatever the present waited)
+                const double next = finished_at + (std::floor((secs - finished_at) * 60) + 1) / 60.0;
+                const double now = std::chrono::duration<double>(clock::now() - t0).count();
+                if (next > now) Sleep((DWORD)std::max(1.0, (next - now) * 1000));
+            }
         }
         SetEvent(painted);
     });
@@ -1022,7 +1108,7 @@ void prepare_with_screen() {
     }
     worker.join();
     paint_stop.store(true);
-    if (WaitForSingleObject(painted, 1000) == WAIT_OBJECT_0) painter.join();
+    if (WaitForSingleObject(painted, 1000 + (DWORD)(kStartupOutro * 1000)) == WAIT_OBJECT_0) painter.join();
     else {   // (its present waits for the window to be seen: the game's own presents will, too)
         logf("vk: start-up: the window is not being shown; the game starts without waiting for it");
         painter.detach();

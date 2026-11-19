@@ -3,48 +3,91 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              StartupUri="MainWindow.xaml" ShutdownMode="OnMainWindowClose">
   <Application.Resources>
-    <!-- The tablet is forest stone: its colours never change. The sky behind it follows the player's clock (MainWindow.xaml.cs). -->
-    <Color x:Key="CStone">#13231C</Color>
+    <!-- The launcher is the game's cartridge, as its in-game menu is (gpu/vk/vk_menu.cpp): a grey shell with its grooves, a
+         dark side for what to do, a cream label for the pages. The pages' colours are the controller's: red, yellow, green and
+         blue, one a part (Accent: set by each page). The type is the game's own, Rubik (assets/fonts). -->
     <Color x:Key="CGold">#C9A24B</Color>
-    <Color x:Key="CTunic">#3E8E4B</Color>
-    <SolidColorBrush x:Key="Bone" Color="#EFE6D0"/>
-    <SolidColorBrush x:Key="BoneSoft" Color="#BDB79F"/>
-    <SolidColorBrush x:Key="BoneFaint" Color="#8E907B"/>
+    <Color x:Key="CTunic">#3E8A4E</Color>
+    <!-- (the words on the label: Bone is the ink now, the soft and faint greys after it) -->
+    <SolidColorBrush x:Key="Bone" Color="#2A2724"/>
+    <SolidColorBrush x:Key="BoneSoft" Color="#6B655C"/>
+    <SolidColorBrush x:Key="BoneFaint" Color="#8A8376"/>
+    <SolidColorBrush x:Key="HelpInk" Color="#4A453E"/>
     <SolidColorBrush x:Key="Gold" Color="{StaticResource CGold}"/>
     <SolidColorBrush x:Key="Tunic" Color="{StaticResource CTunic}"/>
-    <SolidColorBrush x:Key="Rule" Color="#22EFE6D0"/>
-    <SolidColorBrush x:Key="Warn" Color="#D9825B"/>
-    <FontFamily x:Key="Display">Palatino Linotype, Book Antiqua, Georgia</FontFamily>
-    <FontFamily x:Key="Text">Candara, Segoe UI</FontFamily>
-
+    <SolidColorBrush x:Key="Rule" Color="#E2DBCB"/>
+    <SolidColorBrush x:Key="Warn" Color="#C0473D"/>
+    <!-- (the cartridge) -->
+    <SolidColorBrush x:Key="Shell" Color="#B9B4AA"/>
+    <SolidColorBrush x:Key="Groove" Color="#A39E93"/>
+    <SolidColorBrush x:Key="Label" Color="#ECE6D8"/>
+    <SolidColorBrush x:Key="Off" Color="#CFC7B6"/>
+    <SolidColorBrush x:Key="Track" Color="#D6CDB9"/>
+    <SolidColorBrush x:Key="Side" Color="#2A2733"/>
+    <SolidColorBrush x:Key="SideHover" Color="#3A3646"/>
+    <SolidColorBrush x:Key="SideText" Color="#ECE6D8"/>
+    <SolidColorBrush x:Key="SideSoft" Color="#A8A2B5"/>
+    <!-- (the controller's colours: a strip, the light tint of a selected row, that row's edge) -->
+    <SolidColorBrush x:Key="Red" Color="#C0473D"/>
+    <SolidColorBrush x:Key="RedTint" Color="#F2D6D0"/>
+    <SolidColorBrush x:Key="RedEdge" Color="#D98E86"/>
+    <SolidColorBrush x:Key="Yellow" Color="#D4A532"/>
+    <SolidColorBrush x:Key="YellowTint" Color="#F3E6BE"/>
+    <SolidColorBrush x:Key="YellowEdge" Color="#E3C474"/>
+    <SolidColorBrush x:Key="Green" Color="#3E8A4E"/>
+    <SolidColorBrush x:Key="GreenTint" Color="#D3E6D2"/>
+    <SolidColorBrush x:Key="GreenEdge" Color="#88B890"/>
+    <SolidColorBrush x:Key="Blue" Color="#3F5FB0"/>
+    <SolidColorBrush x:Key="BlueTint" Color="#D5DCEF"/>
+    <SolidColorBrush x:Key="BlueEdge" Color="#8A9DD0"/>
+    <SolidColorBrush x:Key="Accent" Color="#C0473D"/>
+    <SolidColorBrush x:Key="AccentTint" Color="#F2D6D0"/>
+    <SolidColorBrush x:Key="AccentEdge" Color="#D98E86"/>
+    <SolidColorBrush x:Key="AccentOn" Color="White"/>   <!-- (the words on the colour: dark on the yellow) -->
+    <!-- (the staff over the sky: light) -->
+    <SolidColorBrush x:Key="StaffBone" Color="#F3EEE2"/>
+    <SolidColorBrush x:Key="StaffFaint" Color="#D9D2BF"/>
+    <FontFamily x:Key="Display">pack://application:,,,/fonts/#Rubik</FontFamily>
+    <FontFamily x:Key="Text">pack://application:,,,/fonts/#Rubik</FontFamily>
     <FontFamily x:Key="Mono">Cascadia Mono, Consolas</FontFamily>
 
     <!-- (no implicit TextBlock style: one in the application's resources reaches inside control templates and would override
          the colour and face a tab or a choice gives its own words. The window sets the face and the colour, and they inherit) -->
+    <!-- A page's title, on the strip of its colour -->
     <Style x:Key="ViewTitle" TargetType="TextBlock">
       <Setter Property="FontFamily" Value="{StaticResource Display}"/>
-      <Setter Property="FontSize" Value="27"/>
-      <Setter Property="Foreground" Value="{StaticResource Bone}"/>
+      <Setter Property="FontWeight" Value="ExtraBold"/>
+      <Setter Property="FontSize" Value="18"/>
+      <Setter Property="Foreground" Value="White"/>
+    </Style>
+    <Style x:Key="Strip" TargetType="Border">
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Padding" Value="16,7,18,8"/>
+      <Setter Property="HorizontalAlignment" Value="Left"/>
     </Style>
     <Style x:Key="Body" TargetType="TextBlock">
       <Setter Property="FontFamily" Value="{StaticResource Text}"/>
-      <Setter Property="FontSize" Value="14.5"/>
-      <Setter Property="LineHeight" Value="21"/>
-      <Setter Property="Foreground" Value="{StaticResource BoneSoft}"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="LineHeight" Value="20"/>
+      <Setter Property="Foreground" Value="{StaticResource HelpInk}"/>
       <Setter Property="TextWrapping" Value="Wrap"/>
     </Style>
+    <!-- A small heading over a group of rows, as the in-game menu's -->
     <Style x:Key="Section" TargetType="TextBlock">
-      <Setter Property="FontFamily" Value="{StaticResource Display}"/>
-      <Setter Property="FontSize" Value="17"/>
-      <Setter Property="Foreground" Value="{StaticResource Gold}"/>
-      <Setter Property="Margin" Value="0,18,0,6"/>
+      <Setter Property="FontFamily" Value="{StaticResource Text}"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Foreground" Value="{StaticResource BoneFaint}"/>
+      <Setter Property="Margin" Value="12,16,0,4"/>
     </Style>
 
-    <!-- A settings row: label and hint on the left, its control on the right, a hairline under it -->
+    <!-- A settings row: its name and control on one line, what it does under them when it is the selected one (Home.cs) -->
     <Style x:Key="Row" TargetType="Border">
       <Setter Property="BorderBrush" Value="{StaticResource Rule}"/>
       <Setter Property="BorderThickness" Value="0,0,0,1"/>
-      <Setter Property="Padding" Value="0,11,0,11"/>
+      <Setter Property="Padding" Value="12,8,12,8"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="CornerRadius" Value="0"/>
     </Style>
     <Style x:Key="RowLabel" TargetType="TextBlock">
       <Setter Property="FontFamily" Value="{StaticResource Text}"/>
@@ -56,43 +99,46 @@
       <Setter Property="FontFamily" Value="{StaticResource Text}"/>
       <Setter Property="FontSize" Value="13"/>
       <Setter Property="LineHeight" Value="18"/>
-      <Setter Property="Foreground" Value="{StaticResource BoneFaint}"/>
+      <Setter Property="Foreground" Value="{StaticResource HelpInk}"/>
       <Setter Property="TextWrapping" Value="Wrap"/>
-      <Setter Property="Margin" Value="0,3,0,0"/>
+      <Setter Property="Margin" Value="0,4,0,0"/>
     </Style>
 
     <Style x:Key="FocusRing">
       <Setter Property="Control.Template">
         <Setter.Value>
           <ControlTemplate>
-            <Rectangle Margin="-3" Stroke="{StaticResource Gold}" StrokeThickness="1" StrokeDashArray="2 2" SnapsToDevicePixels="True"/>
+            <Rectangle Margin="-3" RadiusX="6" RadiusY="6" Stroke="{DynamicResource Accent}" StrokeThickness="1.5" StrokeDashArray="2 2" SnapsToDevicePixels="True"/>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
     </Style>
 
-    <!-- A page of the tablet: its name, a gold line under the open one -->
+    <!-- The pages of the options: strips of their colours across the label's top, the open one taller -->
     <Style x:Key="Tab" TargetType="RadioButton">
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Foreground" Value="{StaticResource BoneFaint}"/>
-      <Setter Property="FontFamily" Value="{StaticResource Display}"/>
-      <Setter Property="FontSize" Value="18"/>
-      <Setter Property="Margin" Value="0,0,30,0"/>
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="FontFamily" Value="{StaticResource Text}"/>
+      <Setter Property="FontWeight" Value="Medium"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="Margin" Value="0,0,3,0"/>
       <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="RadioButton">
-            <Grid Background="Transparent">
-              <ContentPresenter Margin="0,6,0,10" TextElement.Foreground="{TemplateBinding Foreground}"/>
-              <Rectangle x:Name="line" Height="2" VerticalAlignment="Bottom" Fill="{StaticResource Gold}" Opacity="0"/>
-            </Grid>
+            <Border x:Name="strip" Background="{TemplateBinding Background}" CornerRadius="8,8,0,0" Margin="0,8,0,0" Opacity="0.5" Height="34" VerticalAlignment="Bottom">
+              <ContentPresenter Margin="14,0,0,0" VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}"/>
+            </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter Property="Foreground" Value="{StaticResource BoneSoft}"/>
+                <Setter TargetName="strip" Property="Opacity" Value="0.75"/>
               </Trigger>
               <Trigger Property="IsChecked" Value="True">
-                <Setter Property="Foreground" Value="{StaticResource Bone}"/>
-                <Setter TargetName="line" Property="Opacity" Value="1"/>
+                <Setter TargetName="strip" Property="Opacity" Value="1"/>
+                <Setter TargetName="strip" Property="Margin" Value="0"/>
+                <Setter TargetName="strip" Property="Height" Value="42"/>
+                <Setter Property="FontWeight" Value="ExtraBold"/>
+                <Setter Property="FontSize" Value="17"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -100,28 +146,68 @@
       </Setter>
     </Style>
 
-    <!-- One choice among several: plain words, the chosen one underlined in gold (no pills) -->
+    <!-- The side's places: Home and Options -->
+    <Style x:Key="Nav" TargetType="RadioButton">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Foreground" Value="{StaticResource SideSoft}"/>
+      <Setter Property="FontFamily" Value="{StaticResource Text}"/>
+      <Setter Property="FontSize" Value="15"/>
+      <Setter Property="Margin" Value="0,0,0,3"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <!-- (Tag: the place's icon, a Segoe glyph; BorderBrush: its page's colour, the bar at its left) -->
+          <ControlTemplate TargetType="RadioButton">
+            <Border x:Name="b" Background="Transparent" CornerRadius="8" Padding="0,9,10,9">
+              <DockPanel>
+                <Rectangle x:Name="bar" Width="3" Height="18" RadiusX="1.5" RadiusY="1.5" Fill="{TemplateBinding BorderBrush}" Opacity="0.55" Margin="0,0,10,0"/>
+                <TextBlock Text="{TemplateBinding Tag}" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" FontWeight="Normal"
+                           Foreground="{TemplateBinding Foreground}" VerticalAlignment="Center" Width="20" Margin="0,0,9,0"/>
+                <ContentPresenter VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}"/>
+              </DockPanel>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Foreground" Value="{StaticResource SideText}"/>
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="b" Property="Background" Value="{StaticResource SideHover}"/>
+                <Setter TargetName="bar" Property="Opacity" Value="1"/>
+                <Setter Property="Foreground" Value="{StaticResource SideText}"/>
+                <Setter Property="FontWeight" Value="Bold"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.45"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- One choice among several: a pill of the page's colour for the chosen one, plain words for the others -->
     <Style x:Key="Choice" TargetType="RadioButton">
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Foreground" Value="{StaticResource BoneFaint}"/>
+      <Setter Property="Foreground" Value="{StaticResource BoneSoft}"/>
       <Setter Property="FontFamily" Value="{StaticResource Text}"/>
-      <Setter Property="FontSize" Value="14.5"/>
-      <Setter Property="Margin" Value="0,0,20,2"/>
+      <Setter Property="FontSize" Value="13.5"/>
+      <Setter Property="Margin" Value="0,0,4,4"/>
       <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="RadioButton">
-            <Grid Background="Transparent">
-              <ContentPresenter Margin="0,3,0,6" TextElement.Foreground="{TemplateBinding Foreground}"/>
-              <Rectangle x:Name="line" Height="1.5" VerticalAlignment="Bottom" Fill="{StaticResource Gold}" Opacity="0"/>
-            </Grid>
+            <Border x:Name="pill" Background="Transparent" CornerRadius="11" Padding="10,3,10,4">
+              <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}"/>
+            </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter Property="Foreground" Value="{StaticResource BoneSoft}"/>
+                <Setter TargetName="pill" Property="Background" Value="#14000000"/>
+                <Setter Property="Foreground" Value="{StaticResource Bone}"/>
               </Trigger>
               <Trigger Property="IsChecked" Value="True">
-                <Setter Property="Foreground" Value="{StaticResource Bone}"/>
-                <Setter TargetName="line" Property="Opacity" Value="1"/>
+                <Setter TargetName="pill" Property="Background" Value="{DynamicResource Accent}"/>
+                <Setter Property="Foreground" Value="{DynamicResource AccentOn}"/>
+                <Setter Property="FontWeight" Value="Bold"/>
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
                 <Setter Property="Opacity" Value="0.4"/>
@@ -132,7 +218,7 @@
       </Setter>
     </Style>
 
-    <!-- One of the player's game files: a gold bar at its left when it is the chosen one -->
+    <!-- One of the player's game files: tinted, with a bar of the page's colour, when it is the chosen one -->
     <Style x:Key="FileRow" TargetType="RadioButton">
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Foreground" Value="{StaticResource Bone}"/>
@@ -140,19 +226,21 @@
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="RadioButton">
-            <Border x:Name="b" Background="Transparent" BorderBrush="{StaticResource Rule}" BorderThickness="0,0,0,1" Padding="14,10,4,10">
+            <Border x:Name="b" Background="Transparent" BorderBrush="{StaticResource Rule}" BorderThickness="0,0,0,1" CornerRadius="0" Padding="14,10,10,10">
               <Grid>
-                <Rectangle x:Name="bar" Width="3" HorizontalAlignment="Left" Margin="-14,0,0,0" Fill="{StaticResource Gold}" Opacity="0"/>
+                <Rectangle x:Name="bar" Width="3" HorizontalAlignment="Left" Margin="-14,-2,0,-2" RadiusX="1.5" RadiusY="1.5" Fill="{DynamicResource Accent}" Opacity="0"/>
                 <ContentPresenter/>
               </Grid>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="b" Property="Background" Value="#10EFE6D0"/>
+                <Setter TargetName="b" Property="Background" Value="#0C000000"/>
               </Trigger>
               <Trigger Property="IsChecked" Value="True">
                 <Setter TargetName="bar" Property="Opacity" Value="1"/>
-                <Setter TargetName="b" Property="Background" Value="#16EFE6D0"/>
+                <Setter TargetName="b" Property="Background" Value="{DynamicResource AccentTint}"/>
+                <Setter TargetName="b" Property="CornerRadius" Value="9"/>
+                <Setter TargetName="b" Property="BorderThickness" Value="0"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -160,7 +248,7 @@
       </Setter>
     </Style>
 
-    <!-- On / off: a small slab whose square stone slides; green when on -->
+    <!-- On / off: a round switch, the page's colour when on -->
     <Style x:Key="Switch" TargetType="CheckBox">
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
@@ -169,19 +257,19 @@
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="CheckBox">
-            <Grid Width="44" Height="22" Background="Transparent">
-              <Border x:Name="track" CornerRadius="3" Background="#18EFE6D0" BorderBrush="#40EFE6D0" BorderThickness="1"/>
-              <Border x:Name="on" CornerRadius="3" Background="{StaticResource Tunic}" Opacity="0"/>
-              <Border x:Name="thumb" Width="16" Height="16" CornerRadius="2" Background="{StaticResource Bone}" HorizontalAlignment="Left" Margin="3,0,0,0">
-                <Border.RenderTransform><TranslateTransform x:Name="tx" X="0"/></Border.RenderTransform>
-              </Border>
+            <Grid Width="40" Height="22" Background="Transparent">
+              <Border x:Name="track" CornerRadius="11" Background="{StaticResource Off}"/>
+              <Border x:Name="on" CornerRadius="11" Background="{DynamicResource Accent}" Opacity="0"/>
+              <Ellipse x:Name="thumb" Width="16" Height="16" Fill="White" HorizontalAlignment="Left" Margin="3,0,0,0">
+                <Ellipse.RenderTransform><TranslateTransform x:Name="tx" X="0"/></Ellipse.RenderTransform>
+              </Ellipse>
             </Grid>
             <ControlTemplate.Triggers>
               <Trigger Property="IsChecked" Value="True">
                 <Trigger.EnterActions>
                   <BeginStoryboard>
                     <Storyboard>
-                      <DoubleAnimation Storyboard.TargetName="tx" Storyboard.TargetProperty="X" To="22" Duration="0:0:0.14"/>
+                      <DoubleAnimation Storyboard.TargetName="tx" Storyboard.TargetProperty="X" To="18" Duration="0:0:0.14"/>
                       <DoubleAnimation Storyboard.TargetName="on" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.14"/>
                     </Storyboard>
                   </BeginStoryboard>
@@ -195,11 +283,8 @@
                   </BeginStoryboard>
                 </Trigger.ExitActions>
               </Trigger>
-              <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="track" Property="BorderBrush" Value="#80EFE6D0"/>
-              </Trigger>
               <Trigger Property="IsEnabled" Value="False">
-                <Setter Property="Opacity" Value="0.35"/>
+                <Setter Property="Opacity" Value="0.4"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -207,7 +292,7 @@
       </Setter>
     </Style>
 
-    <!-- Play: a green plaque with a gold line set into it. It darkens when pressed; nothing glows. -->
+    <!-- Play: the controller's green, round, set a little above its shadow. It goes down when pressed. -->
     <Style x:Key="Play" TargetType="Button">
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
@@ -215,26 +300,20 @@
         <Setter.Value>
           <ControlTemplate TargetType="Button">
             <Grid>
-              <Border x:Name="plate" CornerRadius="4">
-                <Border.Background>
-                  <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-                    <GradientStop Color="#4A9E57" Offset="0"/>
-                    <GradientStop Color="#2F7A3D" Offset="1"/>
-                  </LinearGradientBrush>
-                </Border.Background>
+              <Border CornerRadius="12" Background="#2C6438" Margin="0,4,0,0"/>
+              <Border x:Name="plate" CornerRadius="12" Background="{StaticResource Green}" Margin="0,0,0,4">
+                <Grid>
+                  <Border x:Name="shade" CornerRadius="12" Background="White" Opacity="0"/>
+                  <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Grid>
               </Border>
-              <Border x:Name="shade" CornerRadius="4" Background="#000000" Opacity="0"/>
-              <Border CornerRadius="2" Margin="4" BorderBrush="#B3E3C876" BorderThickness="1"/>
-              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Grid>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="shade" Property="Background" Value="#FFFFFF"/>
-                <Setter TargetName="shade" Property="Opacity" Value="0.08"/>
+                <Setter TargetName="shade" Property="Opacity" Value="0.10"/>
               </Trigger>
               <Trigger Property="IsPressed" Value="True">
-                <Setter TargetName="shade" Property="Background" Value="#000000"/>
-                <Setter TargetName="shade" Property="Opacity" Value="0.18"/>
+                <Setter TargetName="plate" Property="Margin" Value="0,3,0,1"/>
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
                 <Setter Property="Opacity" Value="0.45"/>
@@ -245,11 +324,12 @@
       </Setter>
     </Style>
 
-    <!-- A quiet action: words, underlined when the pointer is on them -->
+    <!-- A quiet action: words of the page's colour, underlined when the pointer is on them -->
     <Style x:Key="Link" TargetType="Button">
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Foreground" Value="{StaticResource BoneSoft}"/>
+      <Setter Property="Foreground" Value="{DynamicResource Accent}"/>
       <Setter Property="FontFamily" Value="{StaticResource Text}"/>
+      <Setter Property="FontWeight" Value="Medium"/>
       <Setter Property="FontSize" Value="14"/>
       <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
       <Setter Property="Template">
@@ -257,11 +337,10 @@
           <ControlTemplate TargetType="Button">
             <Grid Background="Transparent">
               <ContentPresenter Margin="0,2,0,4" TextElement.Foreground="{TemplateBinding Foreground}"/>
-              <Rectangle x:Name="line" Height="1" VerticalAlignment="Bottom" Fill="{StaticResource BoneSoft}" Opacity="0.35"/>
+              <Rectangle x:Name="line" Height="1" VerticalAlignment="Bottom" Fill="{TemplateBinding Foreground}" Opacity="0"/>
             </Grid>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter Property="Foreground" Value="{StaticResource Bone}"/>
                 <Setter TargetName="line" Property="Opacity" Value="1"/>
               </Trigger>
             </ControlTemplate.Triggers>
@@ -270,40 +349,23 @@
       </Setter>
     </Style>
 
-    <!-- What a link leads to, said above it: the same stone and gold edge as the language list, no shadow -->
-    <Style x:Key="Tip" TargetType="ToolTip">
-      <Setter Property="Foreground" Value="{StaticResource Bone}"/>
-      <Setter Property="FontFamily" Value="{StaticResource Text}"/>
-      <Setter Property="FontSize" Value="13.5"/>
-      <Setter Property="HasDropShadow" Value="False"/>
-      <Setter Property="Placement" Value="Top"/>
-      <Setter Property="VerticalOffset" Value="-6"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="ToolTip">
-            <Border CornerRadius="3" Background="#F813231C" BorderBrush="#66C9A24B" BorderThickness="1" Padding="10,5,10,6">
-              <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}"/>
-            </Border>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-
-    <!-- Window buttons -->
-    <Style x:Key="Chrome" TargetType="Button">
+    <!-- The side's small icons (the game folder, help, Discord, a problem to report): a Segoe glyph, its name in a tooltip -->
+    <Style x:Key="SideIcon" TargetType="Button">
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="Width" Value="36"/>
-      <Setter Property="Height" Value="30"/>
+      <Setter Property="Foreground" Value="{StaticResource SideSoft}"/>
+      <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets"/>
+      <Setter Property="FontSize" Value="17"/>
       <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="b" CornerRadius="3" Background="Transparent">
-              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Border x:Name="b" Background="Transparent" CornerRadius="8" Width="38" Height="34">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="b" Property="Background" Value="#22EFE6D0"/>
+                <Setter TargetName="b" Property="Background" Value="{StaticResource SideHover}"/>
+                <Setter Property="Foreground" Value="{StaticResource SideText}"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -311,15 +373,86 @@
       </Setter>
     </Style>
 
-    <!-- Slider: a line and a small gold lozenge -->
+    <!-- The status card's update: gold, outlined, under the version -->
+    <Style x:Key="GoldButton" TargetType="Button">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Foreground" Value="#F3E3B8"/>
+      <Setter Property="FontFamily" Value="{StaticResource Text}"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="FontSize" Value="13.5"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" Background="#26D4A532" BorderBrush="{StaticResource Yellow}" BorderThickness="1.2" CornerRadius="8" Padding="0,7,0,8">
+              <ContentPresenter HorizontalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="b" Property="Background" Value="#4DD4A532"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.45"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- What a link leads to, said above it: a small cream label -->
+    <Style x:Key="Tip" TargetType="ToolTip">
+      <Setter Property="Foreground" Value="{StaticResource Bone}"/>
+      <Setter Property="FontFamily" Value="{StaticResource Text}"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="HasDropShadow" Value="False"/>
+      <Setter Property="Placement" Value="Top"/>
+      <Setter Property="VerticalOffset" Value="-6"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToolTip">
+            <Border CornerRadius="7" Background="{StaticResource Label}" BorderBrush="{StaticResource Shell}" BorderThickness="2" Padding="10,5,10,6" MaxWidth="420">
+              <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}">
+                <ContentPresenter.Resources>
+                  <Style TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/></Style>
+                </ContentPresenter.Resources>
+              </ContentPresenter>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Window buttons, on the shell -->
+    <Style x:Key="Chrome" TargetType="Button">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Width" Value="34"/>
+      <Setter Property="Height" Value="24"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" CornerRadius="6" Background="Transparent">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="b" Property="Background" Value="#22000000"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Slider: a track filled with the page's colour, a round knob ringed with the cream -->
     <Style x:Key="Lozenge" TargetType="Thumb">
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Thumb">
-            <Grid Width="16" Height="16" Background="Transparent">
-              <Rectangle Width="10" Height="10" Fill="{StaticResource Gold}" RenderTransformOrigin="0.5,0.5">
-                <Rectangle.RenderTransform><RotateTransform Angle="45"/></Rectangle.RenderTransform>
-              </Rectangle>
+            <Grid Width="18" Height="18" Background="Transparent">
+              <Ellipse Fill="{StaticResource Label}"/>
+              <Ellipse Margin="2.5" Fill="{DynamicResource Accent}"/>
             </Grid>
           </ControlTemplate>
         </Setter.Value>
@@ -332,13 +465,13 @@
         <Setter.Value>
           <ControlTemplate TargetType="Slider">
             <Grid Height="22">
-              <Rectangle Height="1" Fill="#55EFE6D0" VerticalAlignment="Center"/>
+              <Border Height="4" CornerRadius="2" Background="{StaticResource Track}" VerticalAlignment="Center"/>
               <Track x:Name="PART_Track" VerticalAlignment="Center">
                 <Track.DecreaseRepeatButton>
                   <RepeatButton Command="Slider.DecreaseLarge" Focusable="False">
                     <RepeatButton.Template>
                       <ControlTemplate TargetType="RepeatButton">
-                        <Grid Background="Transparent" Height="22"><Rectangle Height="2" Fill="{StaticResource Gold}" VerticalAlignment="Center"/></Grid>
+                        <Grid Background="Transparent" Height="22"><Border Height="4" CornerRadius="2" Background="{DynamicResource Accent}" VerticalAlignment="Center"/></Grid>
                       </ControlTemplate>
                     </RepeatButton.Template>
                   </RepeatButton>
@@ -358,24 +491,23 @@
       </Setter>
     </Style>
 
-    <!-- Language list: the chosen name over a line, the list on the same stone -->
+    <!-- Language list: the chosen name in a cream field, the list on the same label -->
     <Style x:Key="ListItem" TargetType="ComboBoxItem">
-      <Setter Property="Foreground" Value="{StaticResource BoneSoft}"/>
+      <Setter Property="Foreground" Value="{StaticResource Bone}"/>
       <Setter Property="FontFamily" Value="{StaticResource Text}"/>
       <Setter Property="FontSize" Value="14"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="ComboBoxItem">
-            <Border x:Name="b" Padding="12,6" Background="Transparent">
+            <Border x:Name="b" Padding="12,6" Margin="4,0" CornerRadius="6" Background="Transparent">
               <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsHighlighted" Value="True">
-                <Setter TargetName="b" Property="Background" Value="#1CEFE6D0"/>
-                <Setter Property="Foreground" Value="{StaticResource Bone}"/>
+                <Setter TargetName="b" Property="Background" Value="{DynamicResource AccentTint}"/>
               </Trigger>
               <Trigger Property="IsSelected" Value="True">
-                <Setter Property="Foreground" Value="{StaticResource Gold}"/>
+                <Setter Property="FontWeight" Value="Bold"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -385,7 +517,7 @@
     <Style x:Key="List" TargetType="ComboBox">
       <Setter Property="Foreground" Value="{StaticResource Bone}"/>
       <Setter Property="FontFamily" Value="{StaticResource Text}"/>
-      <Setter Property="FontSize" Value="14.5"/>
+      <Setter Property="FontSize" Value="14"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
       <Setter Property="ItemContainerStyle" Value="{StaticResource ListItem}"/>
@@ -396,20 +528,20 @@
               <ToggleButton Focusable="False" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" ClickMode="Press">
                 <ToggleButton.Template>
                   <ControlTemplate TargetType="ToggleButton">
-                    <Border x:Name="bb" Background="Transparent" BorderBrush="#55EFE6D0" BorderThickness="0,0,0,1">
-                      <Path HorizontalAlignment="Right" Margin="0,0,4,0" VerticalAlignment="Center" Data="M0,0 L5,5 L10,0" Stroke="{StaticResource BoneSoft}" StrokeThickness="1.4"/>
+                    <Border x:Name="bb" Background="#F6F2E8" BorderBrush="{StaticResource Off}" BorderThickness="1" CornerRadius="8">
+                      <Path HorizontalAlignment="Right" Margin="0,0,10,0" VerticalAlignment="Center" Data="M0,0 L5,5 L10,0" Stroke="{StaticResource BoneSoft}" StrokeThickness="1.6"/>
                     </Border>
                     <ControlTemplate.Triggers>
                       <Trigger Property="IsMouseOver" Value="True">
-                        <Setter TargetName="bb" Property="BorderBrush" Value="{StaticResource Gold}"/>
+                        <Setter TargetName="bb" Property="BorderBrush" Value="{DynamicResource Accent}"/>
                       </Trigger>
                     </ControlTemplate.Triggers>
                   </ControlTemplate>
                 </ToggleButton.Template>
               </ToggleButton>
-              <ContentPresenter Margin="0,5,26,7" IsHitTestVisible="False" Content="{TemplateBinding SelectionBoxItem}" VerticalAlignment="Center"/>
+              <ContentPresenter Margin="12,6,30,7" IsHitTestVisible="False" Content="{TemplateBinding SelectionBoxItem}" VerticalAlignment="Center"/>
               <Popup IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" PopupAnimation="Fade" Focusable="False">
-                <Border Margin="0,4,0,0" CornerRadius="3" Background="#F813231C" BorderBrush="#66C9A24B" BorderThickness="1" Padding="0,4"
+                <Border Margin="0,4,0,0" CornerRadius="9" Background="{StaticResource Label}" BorderBrush="{StaticResource Shell}" BorderThickness="2" Padding="0,4"
                         MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" MaxHeight="300">
                   <ScrollViewer VerticalScrollBarVisibility="Auto"><ItemsPresenter/></ScrollViewer>
                 </Border>
@@ -431,7 +563,7 @@
               <Track.Thumb>
                 <Thumb>
                   <Thumb.Template>
-                    <ControlTemplate TargetType="Thumb"><Border CornerRadius="2" Background="#40EFE6D0"/></ControlTemplate>
+                    <ControlTemplate TargetType="Thumb"><Border CornerRadius="2" Background="{StaticResource Off}"/></ControlTemplate>
                   </Thumb.Template>
                 </Thumb>
               </Track.Thumb>

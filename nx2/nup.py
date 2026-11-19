@@ -194,6 +194,18 @@ class Nup:
     def name(self, off, n):
         return self.strings[off:off + n].decode("utf-8")
 
+    def listing(self, d, path):
+        """(relink) The names in the folder <path> (a/b) under dir d, a folder's with / at its end; None: no such folder. What
+        the builder checks of the RomFS before the 26 GB of it are unpacked (make_game.py: the version's size table)"""
+        for part in [p for p in path.split("/") if p]:
+            first, n = self.dirs[d][2:4]
+            d = next((k for k in self.kids[first:first + n] if k < self.nd and self.name(*self.dirs[k][:2]) == part), None)
+            if d is None:
+                return None
+        first, n = self.dirs[d][2:4]
+        return [self.name(*self.dirs[k][:2]) + "/" if k < self.nd else self.name(*self.files[k - self.nd][:2])
+                for k in self.kids[first:first + n]]
+
     def walk(self, d, prefix=""):
         """(relative path, file record) for every file under dir d."""
         no, nl, first, n = self.dirs[d]
@@ -375,6 +387,19 @@ def pick_title(nup, want):
     raise SystemExit("no title %s" % want)
 
 
+def resource_names(path, title=None):
+    """(relink) The names in the RomFS's System/Resource of the title extract() takes (the newest by default), without unpacking
+    anything: [] when the RomFS has no such folder, None when the title has no RomFS"""
+    nup = Nup(path)
+    try:
+        t = pick_title(nup, title)
+        if t["romfs"] == 0xffffffff:
+            return None
+        return nup.listing(t["romfs"], "System/Resource") or []
+    finally:
+        nup.f.close()
+
+
 def extraction_path(out, part, rel, temporary_suffix=".part"):
     """A package path stays under its part, without following existing output links."""
     parts = rel.split("/")
@@ -454,6 +479,26 @@ def heal(nup, t, out, names):
                 print("  %s is not a game module in any title: it starts %s" % (m, have.hex()))
 
 
+def yield_to_build():
+    """(relink, Windows) This process's disk reads and writes at low priority, and the file cache pages it fills first to go:
+    the RomFS is unpacked beside the lift and the compile (make_game.py), which have the disk and the memory first. Its CPU
+    priority stays as it is: a packed file's decompression still gets its share"""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        k = ctypes.WinDLL("kernel32")
+        k.GetCurrentProcess.restype = ctypes.c_void_p
+        me = ctypes.c_void_p(k.GetCurrentProcess())
+        io = ctypes.c_ulong(1)   # (IoPriorityLow; ProcessIoPriority is information class 33)
+        ctypes.WinDLL("ntdll").NtSetInformationProcess(me, 33, ctypes.byref(io), ctypes.sizeof(io))
+        k.SetProcessInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong]
+        mem = ctypes.c_ulong(2)   # (MEMORY_PRIORITY_LOW; ProcessMemoryPriority is class 0)
+        k.SetProcessInformation(me, 0, ctypes.byref(mem), ctypes.sizeof(mem))
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("nup")
@@ -461,7 +506,11 @@ def main():
     ap.add_argument("--verify", action="store_true", help="read-only hashes/extents and expected game .zs headers; all titles unless --title")
     ap.add_argument("--title", help="index, version or title id (extract default: newest; verify default: all)")
     ap.add_argument("--only", choices=("exefs", "romfs"))
+    ap.add_argument("--yield", dest="yield_", action="store_true",
+                    help="disk and file cache at low priority: unpacking beside a build (make_game.py)")
     a = ap.parse_args()
+    if a.yield_:
+        yield_to_build()
     if a.verify and a.extract:
         ap.error("--verify does not extract; run extraction separately")
     try:

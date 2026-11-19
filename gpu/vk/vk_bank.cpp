@@ -185,7 +185,11 @@ void register_texture_copy(int id, const nvn_tex& tex, const nvn_view* v) {
         if (prefetch_seen.size() > (1u << 20)) prefetch_seen.clear();
         if (prefetch_seen.insert(t->serial).second && prefetch_q.size() < 16384) prefetch_q.push_back(*t);
     }
-    if (first_reg_frame.size() < (1u << 20)) first_reg_frame.try_emplace(t->gpu, texture_frame_no());
+    // (relink, 0.7.9.2) only for its one reader, RX_VK_LOG_PREFETCH's log (vk_texture.cpp): filled at every registration, the map
+    // took each new texture address for the whole session (OoT's transient render targets move address, ~20 a frame while the
+    // camera turns in the Market), up to a million entries, rehashed under reg_mu as it grew
+    static const bool note_first = getenv("RX_VK_LOG_PREFETCH") != nullptr;
+    if (note_first && first_reg_frame.size() < (1u << 20)) first_reg_frame.try_emplace(t->gpu, texture_frame_no());
     slot_versions[id].fetch_add(1, std::memory_order_acq_rel);
     reg_gen++;
 }

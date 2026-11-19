@@ -95,17 +95,17 @@ inline std::string percent_text(size_t done, size_t total) {
     return std::to_string(p) + "%";
 }
 
-/// What the start-up screen shows (vk_startup_paint.h draws it): a night landscape that turns to dawn as the start goes on, one
-/// word and one number. Nothing of what is being made is named there (shaders, pipelines: the log says it)
+/// What the start-up screen shows (vk_startup_paint.h draws it): the project's mark being written, one number and one line
 struct StartupView {
     std::string version;            // ("v2.0.5"; empty: the build's)
-    std::string label, pct;         // ("LOADING", "32"); an empty label: the scene and the wordmark alone
-    std::string right;              // (at the end of the line of light: "about 6 min left")
-    std::string tip;                // (the bottom line: one of the tips, or what closing keeps)
-    double fraction = -1;           // (the line of light, 0 to 1; negative: none, a glint travels along it instead)
-    double dawn = 0;                // (0 the night, 1 daybreak: how far the whole start is)
-    double anim = 0;                // (seconds since the window opened: the fireflies, the stars, the glint)
-    double tip_fade = 1;            // (0 to 1: the tip coming in and going out)
+    std::string label, pct;         // ("LOADING", "STARTING", "CLOSING"; "32"); an empty label: the mark alone
+    std::string right;              // (after what is being done: "about 6 min left")
+    std::string gpu;                // (the graphics card the pipelines are made for: "AMD Radeon RX 6600 XT")
+    int stage = -1;                 // (0 the shader programs, 1 and 2 the pipelines)
+    double fraction = -1;           // (how much of the staff is gold, 0 to 1; negative: nothing counted yet)
+    double anim = 0;                // (seconds since the window opened: the staff opening out, the note waiting)
+    double outro = -1;              // (seconds since a start that showed its staff ended: the gold finishing it, the staff
+                                    // closing into the mark, its pulse; negative: not ended)
     bool operator==(const StartupView&) const = default;
 };
 
@@ -116,23 +116,10 @@ struct StartupState {
     int stage = 0;
     size_t done = 0, total = 0;
     double left = -1, secs = 0;
+    double since_finished = -1;   // (seconds since the work ended, a long start's last moment: the mark closing)
     bool prepared = false, finished = false, stopping = false;
+    bool staff_shown = false;     // (the screen showed the staff open: its ending is played in full, kStartupOutro)
 };
-
-/// The tips of a long start, one every nine seconds (each one true of this build: the menu's keys, what closing keeps)
-inline const char* startup_tip(int i) {
-    static const char* const tips[] = {
-        "The first start is the long one. The next ones take a few seconds.",
-        "In the game, Insert or F1 opens the settings.",
-        "You can close this window: what is done is kept for the next start.",
-        "F11 switches between full screen and a window.",
-        "After a graphics driver update, the game takes this time once more.",
-        "The launcher can put your display at 60 Hz while you play.",
-        "Mods go in the game folder's mods folder, with the game's own paths.",
-    };
-    const int n = (int)(sizeof tips / sizeof tips[0]);
-    return tips[((i % n) + n) % n];
-}
 
 /// How far the whole start is, 0 to 1. A long start's three stages by about the share of its time each took on the development
 /// PC (538 s, 93 s and 360 s): the programs to 0.55, the predicted pipelines to 0.65, the noted ones to the end. A start that
@@ -153,31 +140,28 @@ inline double startup_left(const StartupState& s) {
     return s.left + after * s.secs / overall;
 }
 
-/// The screen for a state. The first second shows the scene and the wordmark alone: a start with next to nothing to prepare is
-/// over by then. A long start goes from night to daybreak; one that prepares nothing new is at dawn already
+/// The screen for a state. The first second shows the mark alone: a start with next to nothing to prepare is over by then. A
+/// start that showed its staff ends in full whenever the work ended (outro: the painter keeps drawing for kStartupOutro
+/// seconds before the game starts): the gold finishes the staff (0.7 s), the staff closes into the mark (1 s), the mark
+/// pulses (0.4 s) and stays a moment
+constexpr double kStartupOutro = 2.3;
 inline StartupView startup_view(const StartupState& s) {
     StartupView v;
     v.anim = s.secs;
-    const double overall = startup_overall(s);
-    v.dawn = s.prepared ? overall : s.stage > 0 ? 1.0 : 0.0;
+    v.stage = s.stage;
     if (s.stopping) {
         v.label = "CLOSING";
-        v.tip = "What is done is kept for the next start.";
         return v;
     }
     if (s.finished) {
-        v.dawn = 1;
         if (s.secs >= 1.0) v.label = "STARTING", v.fraction = 1, v.pct = "100";
+        if (s.staff_shown && s.since_finished >= 0 && s.secs >= 1.0) v.outro = s.since_finished;
         return v;
     }
     if (s.secs < 1.0) return v;
     v.label = "LOADING";
-    if (s.prepared) {   // (a long start: a tip every nine seconds, faded in and out over six tenths)
-        const double at = std::max(0.0, s.secs - 1.0), in = at - 9.0 * (double)(int)(at / 9.0);
-        v.tip = startup_tip((int)(at / 9.0));
-        v.tip_fade = std::max(0.0, std::min({1.0, in / 0.6, (9.0 - in) / 0.6}));
-    }
-    if (!s.total && !(s.prepared && s.stage > 0)) return v;   // (nothing counted yet: the glint)
+    if (!s.total && !(s.prepared && s.stage > 0)) return v;   // (nothing counted yet: the note waits at the start)
+    const double overall = startup_overall(s);
     v.fraction = overall;
     size_t p = (size_t)(overall * 100);
     if (p > 99) p = 99;

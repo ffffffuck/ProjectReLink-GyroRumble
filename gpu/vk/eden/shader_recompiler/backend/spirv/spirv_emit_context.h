@@ -424,6 +424,10 @@ public:
     Id mesh_fallback_word_ptr{};   ///< PhysicalStorageBuffer pointer to a block of one u32
     u32 mesh_fallback_payload_member_index{};
     u32 mesh_fallback_records_member_index{};
+    bool wants_mesh_fallback_base{};   ///< (a task stage, or a mesh stage without one: MESH_FALLBACK_BASE_PUSH_OFFSET's member)
+    u32 mesh_fallback_base_member_index{};
+    /// The fallback's first workgroup of the batch being dispatched (vk_draw.cpp fallback_record), pushed
+    Id MeshFallbackBase();
     /// A pointer to the u32 at a PhysicalStorageBuffer device address
     Id MeshFallbackWord(Id address);
 

@@ -89,4 +89,6 @@ def split(gen, pieces):
 
 if __name__ == "__main__":
     here = os.path.dirname(os.path.abspath(__file__))
-    split(sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "..", "work", "sa", "gen"), int(sys.argv[2]) if len(sys.argv) > 2 else 8)
+    gen_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "..", "work", "sa", "gen")
+    split(gen_dir, int(sys.argv[2]) if len(sys.argv) > 2 else 8)
+    kit.note_sources(gen_dir)   # (relink: its files too, for make_game.py's lift key)
